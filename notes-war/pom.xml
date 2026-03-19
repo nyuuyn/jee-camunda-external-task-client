@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>notes-app</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>notes-war</artifactId>
+    <packaging>war</packaging>
+
+    <name>Notes App - WAR Module</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>jakarta.platform</groupId>
+            <artifactId>jakarta.jakartaee-api</artifactId>
+        </dependency>
+        <!-- Include EJB module classes in WEB-INF/lib -->
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>notes-ejb</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <type>ejb</type>
+        </dependency>
+        <!-- Camunda External Task Client + startup bean + BPMN resource -->
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>notes-camunda-client</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+        <!-- JavaTimeModule for LocalDateTime serialization – provided by WildFly 32 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <version>2.15.4</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+
+
+
+    <build>
+        <finalName>notes</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-war-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

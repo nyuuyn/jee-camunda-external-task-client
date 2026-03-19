@@ -1,0 +1,33 @@
+embed-server --std-out=echo
+
+# Add PostgreSQL JDBC driver as a WildFly module
+module add \
+    --name=org.postgresql \
+    --resources=/opt/jboss/wildfly/customization/postgresql.jar \
+    --dependencies=jakarta.transaction.api,java.se
+
+# Register the JDBC driver
+/subsystem=datasources/jdbc-driver=postgresql:add( \
+    driver-name=postgresql, \
+    driver-module-name=org.postgresql, \
+    driver-class-name=org.postgresql.Driver, \
+    driver-xa-datasource-class-name=org.postgresql.xa.PGXADataSource \
+)
+
+# Add the datasource (connects to 'postgres' host as defined in docker-compose)
+data-source add \
+    --name=NotesDS \
+    --jndi-name=java:/jdbc/NotesDS \
+    --driver-name=postgresql \
+    --connection-url=jdbc:postgresql://postgres:5432/notesdb \
+    --user-name=notes \
+    --password=notes \
+    --validate-on-match=true \
+    --background-validation=false \
+    --valid-connection-checker-class-name=org.jboss.jca.adapters.jdbc.extensions.postgres.PostgreSQLValidConnectionChecker \
+    --exception-sorter-class-name=org.jboss.jca.adapters.jdbc.extensions.postgres.PostgreSQLExceptionSorter \
+    --use-ccm=true \
+    --max-pool-size=25 \
+    --enabled=true
+
+stop-embedded-server
