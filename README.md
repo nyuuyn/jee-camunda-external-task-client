@@ -17,6 +17,7 @@ managed (servlet) request contexts and unmanaged (Camunda worker) threads.
   - [Architecture Overview](#architecture-overview)
   - [How the External Task Client is bootstrapped](#how-the-external-task-client-is-bootstrapped)
   - [CDI Injection in External Task Handlers](#cdi-injection-in-external-task-handlers)
+  - [EE Resource Injection with @Resource](#ee-resource-injection-with-resource)
   - [The Request Context Problem on Unmanaged Threads](#the-request-context-problem-on-unmanaged-threads)
   - [Solving it with RequestContextController](#solving-it-with-requestcontextcontroller)
   - [Which CDI Scopes are Safe on Unmanaged Threads](#which-cdi-scopes-are-safe-on-unmanaged-threads)
@@ -53,11 +54,14 @@ managed (servlet) request contexts and unmanaged (Camunda worker) threads.
 │           └── META-INF/ejb-jar.xml        # Marker: tells WildFly to scan JAR for EJBs
 │
 └── notes-war/                          # WAR module – JAX-RS REST API
-    └── src/main/java/com/example/notes/web/
-        ├── JaxRsActivator.java         # @ApplicationPath("/api")
-        ├── JacksonConfig.java          # Registers JavaTimeModule for LocalDateTime
-        ├── NoteRequest.java            # Request DTO
-        └── NoteResource.java           # REST endpoints
+    └── src/main/
+        ├── java/com/example/notes/web/
+        │   ├── JaxRsActivator.java     # @ApplicationPath("/api")
+        │   ├── JacksonConfig.java      # Registers JavaTimeModule for LocalDateTime
+        │   ├── NoteRequest.java        # Request DTO
+        │   └── NoteResource.java       # REST endpoints
+        └── webapp/WEB-INF/
+            └── web.xml                 # <env-entry> bindings for creator names
 ```
 
 ---
@@ -260,9 +264,14 @@ and hands it to the External Task Client:
 @Dependent  // ← CDI manages this class; no proxy needed (see below)
 public class AddNoteHandler implements ExternalTaskHandler {
 
+    // CDI constructor injection — these fields are final (set at construction time)
     private final NoteService noteService;
     private final CreatorContext creatorContext;
     private final RequestContextController requestContextController;
+
+    // EE container injection — set after construction, cannot be final (see below)
+    @Resource(name = "creator/taskHandler")
+    private String taskHandlerCreatorName;
 
     @Inject  // ← CDI constructor injection
     public AddNoteHandler(NoteService noteService,
@@ -291,6 +300,75 @@ public class AddNoteHandler implements ExternalTaskHandler {
 `@Dependent` is the better fit: the handler is stateless, owns no resources, and lives
 exactly as long as `CamundaClientStartup` (which is the entire application lifetime anyway).
 Constructor injection with `final` fields is cleaner and the intent is clear.
+
+---
+
+### EE Resource Injection with @Resource
+
+Beyond CDI beans, Jakarta EE provides a second injection mechanism — `@Resource` — for
+**environment entries and container-managed resources** such as datasources, JMS destinations,
+and simple configuration values. These are declared in `web.xml` and bound into the
+`java:comp/env/` JNDI namespace of the WAR.
+
+#### Declaring values in web.xml
+
+```xml
+<env-entry>
+    <env-entry-name>creator/restApi</env-entry-name>
+    <env-entry-type>java.lang.String</env-entry-type>
+    <env-entry-value>rest api</env-entry-value>
+</env-entry>
+
+<env-entry>
+    <env-entry-name>creator/taskHandler</env-entry-name>
+    <env-entry-type>java.lang.String</env-entry-type>
+    <env-entry-value>task handler</env-entry-value>
+</env-entry>
+```
+
+The `<env-entry-name>` maps to the JNDI path `java:comp/env/creator/restApi` and
+`java:comp/env/creator/taskHandler` respectively.
+
+#### Injecting with @Resource
+
+The EE container resolves the entry by name and sets the field **after** the bean is
+constructed. The `name` attribute of `@Resource` is relative to `java:comp/env/`:
+
+```java
+// In NoteResource (JAX-RS resource, WAR CDI bean):
+@Resource(name = "creator/restApi")
+private String restApiCreatorName;   // set by EE container, not CDI
+
+// In AddNoteHandler (@Dependent CDI bean, lives in WEB-INF/lib):
+@Resource(name = "creator/taskHandler")
+private String taskHandlerCreatorName;
+```
+
+#### Coexistence of @Resource and @Inject in AddNoteHandler
+
+`@Resource` and `@Inject` are processed by **different container subsystems** and can be
+combined in the same class without conflict:
+
+| Annotation | Processed by | Timing | Fields |
+|---|---|---|---|
+| `@Inject` (constructor) | CDI (Weld) | At bean instantiation | `final` — immutable |
+| `@Resource` (field) | EE container | After construction | Non-`final` — set once, never changed |
+
+This means `AddNoteHandler` uses constructor injection for its CDI dependencies
+(`NoteService`, `CreatorContext`, `RequestContextController`) and field injection via
+`@Resource` for the configuration string — each mechanism doing what it is best suited for.
+
+#### Shared java:comp/env namespace
+
+All CDI-managed beans within a WAR deployment — including those loaded from JARs in
+`WEB-INF/lib` — share the WAR's `java:comp/env` namespace. This is why `AddNoteHandler`,
+which lives in `notes-camunda-client.jar` inside `WEB-INF/lib`, can inject
+`creator/taskHandler` declared in the WAR's `web.xml` without any additional configuration.
+
+> **Changing the creator names without recompiling:** Because the values live in `web.xml`
+> rather than in source code, they can be overridden at the application-server level via
+> a JNDI binding in `standalone.xml`, a deployment overlay, or an environment-specific
+> `web.xml` — without touching application code.
 
 ---
 
@@ -338,7 +416,7 @@ public void execute(ExternalTask task, ExternalTaskService service) {
     requestContextController.activate(); // ← opens a request context on this thread
     try {
 
-        creatorContext.setCreatorName("task handler");
+        creatorContext.setCreatorName(taskHandlerCreatorName); // value from @Resource / web.xml
         // Now the proxy for CreatorContext resolves correctly because
         // there IS an active request context on this thread.
 

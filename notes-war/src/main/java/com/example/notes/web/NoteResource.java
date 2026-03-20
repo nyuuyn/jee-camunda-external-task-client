@@ -3,6 +3,7 @@ package com.example.notes.web;
 import com.example.notes.entity.Note;
 import com.example.notes.service.CreatorContext;
 import com.example.notes.service.NoteService;
+import jakarta.annotation.Resource;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
@@ -24,6 +25,17 @@ public class NoteResource {
      */
     @Inject
     private CreatorContext creatorContext;
+
+    /**
+     * Injected by the EE container from java:comp/env/creator/restApi,
+     * declared as an <env-entry> in web.xml.
+     *
+     * @Resource is processed independently of CDI: the container sets this
+     * field after the bean is constructed. It cannot be final, but it is
+     * effectively constant for the lifetime of the application.
+     */
+    @Resource(name = "creator/restApi")
+    private String restApiCreatorName;
 
     @GET
     public List<Note> getAll() {
@@ -47,7 +59,7 @@ public class NoteResource {
                            .entity("{\"error\":\"title is required\"}")
                            .build();
         }
-        creatorContext.setCreatorName("rest api");
+        creatorContext.setCreatorName(restApiCreatorName);
         Note note = noteService.createNote(request.getTitle(), request.getContent());
         return Response.status(Response.Status.CREATED).entity(note).build();
     }

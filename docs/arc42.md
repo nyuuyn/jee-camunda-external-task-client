@@ -157,6 +157,7 @@ unmanaged threads used by the External Task Client.
 | **Request context on an unmanaged thread** | `AddNoteHandler.execute()` uses `RequestContextController.activate()` / `deactivate()` to open and close a synthetic request context around each task execution, making `@RequestScoped` beans usable on Camunda's worker threads. |
 | **Bootstrapping the External Task Client inside WildFly** | A `@Singleton @Startup` EJB (`CamundaClientStartup`) starts the client using a `ManagedExecutorService` to respect the EJB threading model. |
 | **BPMN process deployment** | The startup EJB deploys the bundled BPMN resource to the Camunda engine via its REST API on every application start (`deploy-changed-only=true` prevents redundant re-deployments). |
+| **Externalised configuration for creator names** | Creator name strings are declared as `<env-entry>` in `web.xml` and injected via `@Resource(name="...")`. This keeps literal values out of source code and allows override at the application-server level without recompilation. |
 | **Containerised operation** | Docker Compose with a healthcheck dependency chain: postgres → camunda → wildfly. |
 
 ---
@@ -207,6 +208,9 @@ notes-camunda-client
 │                             Uses ManagedExecutorService for background work.
 │
 ├── AddNoteHandler             @Dependent ExternalTaskHandler
+│                             @Inject constructor: NoteService, CreatorContext,
+│                             RequestContextController (CDI, final fields).
+│                             @Resource field: taskHandlerCreatorName (EE env-entry).
 │                             Activates request context → sets CreatorContext →
 │                             calls NoteService → completes or fails the task.
 │
@@ -221,21 +225,34 @@ notes-camunda-client
 notes-war
 ├── JaxRsActivator             @ApplicationPath("/api") — activates JAX-RS
 ├── NoteResource               @Path("/notes") — GET, POST, PUT, DELETE
-│                             Injects CreatorContext, sets "rest api" before POST.
+│                             @Resource field: restApiCreatorName (EE env-entry).
+│                             Sets CreatorContext to restApiCreatorName before POST.
 ├── NoteRequest                Plain DTO for the POST/PUT request body
-└── JacksonConfig              @Provider ContextResolver<ObjectMapper>
-                              Registers JavaTimeModule so LocalDateTime serialises
-                              as ISO-8601 strings rather than numeric arrays.
+├── JacksonConfig              @Provider ContextResolver<ObjectMapper>
+│                             Registers JavaTimeModule so LocalDateTime serialises
+│                             as ISO-8601 strings rather than numeric arrays.
+└── WEB-INF/web.xml            Declares two <env-entry> bindings:
+                                creator/restApi     → "rest api"
+                                creator/taskHandler → "task handler"
+                              Bound into java:comp/env/; shared by all CDI beans
+                              in this WAR, including those in WEB-INF/lib JARs.
 ```
 
 ### 5.5 Level 3 — Key Class Interactions
 
 ```
+  web.xml env-entries
+  java:comp/env/
+  ├─ creator/restApi ──────@Resource──► NoteResource.restApiCreatorName
+  └─ creator/taskHandler ──@Resource──► AddNoteHandler.taskHandlerCreatorName
+
 NoteResource                    AddNoteHandler
     │  @Inject                      │  @Inject (constructor)
     ├─► NoteService (proxy)         ├─► NoteService (proxy)
-    └─► CreatorContext (proxy)      ├─► CreatorContext (proxy)
-              │                     └─► RequestContextController
+    ├─► CreatorContext (proxy)      ├─► CreatorContext (proxy)
+    │                               ├─► RequestContextController
+    │  @Resource (field)            │  @Resource (field, post-construction)
+    └─► restApiCreatorName          └─► taskHandlerCreatorName
               │                                │
               │         activate()             │
               │◄──────────────────────────────-┤
@@ -422,6 +439,19 @@ public AddNoteHandler(NoteService noteService,
                       RequestContextController requestContextController) { ... }
 ```
 
+**`@Resource` field injection** — used for EE environment entries (datasources, JMS
+destinations, simple config strings). Processed by the EE container independently of CDI;
+the field is set **after** construction, so it cannot be `final`. In `AddNoteHandler`, the
+two injection mechanisms coexist in the same class without conflict:
+```java
+// CDI — set at construction, final
+private final NoteService noteService;
+
+// EE container — set after construction, not final
+@Resource(name = "creator/taskHandler")
+private String taskHandlerCreatorName;
+```
+
 ### 8.2 CDI Scopes and Proxy Resolution
 
 | Bean | Scope | Proxy injected? | Context always active? |
@@ -490,6 +520,51 @@ Camunda's REST API with `deploy-changed-only=true`. This means:
 - On subsequent starts with an unchanged BPMN: the deployment is skipped (same hash).
 - On redeploy after a BPMN change: a new deployment version is created; running instances
   continue on the old version; new instances use the new version.
+
+### 8.8 EE Environment Entry Injection (`@Resource`)
+
+Jakarta EE `<env-entry>` elements defined in `web.xml` expose named string constants in the
+`java:comp/env/` JNDI namespace. Any CDI-managed bean that is part of the WAR deployment
+(including beans in `WEB-INF/lib` JARs) can read these constants via `@Resource(name="…")`.
+
+**Why use env-entries instead of hard-coded strings?**
+
+The creator names (`"rest api"`, `"task handler"`) are operational configuration, not business
+logic. Externalising them into `web.xml` means they can be overridden at the application-server
+level (via WildFly CLI or `standalone.xml`) without recompiling the application.
+
+**Where it is used:**
+
+| Class | JNDI name | Value |
+|---|---|---|
+| `NoteResource` | `java:comp/env/creator/restApi` | `"rest api"` |
+| `AddNoteHandler` | `java:comp/env/creator/taskHandler` | `"task handler"` |
+
+**Injection mechanics:**
+
+`@Resource` is processed by the EE container **after** the bean is constructed. This means:
+
+1. The container calls the `@Inject` constructor (CDI), setting all `final` fields.
+2. The container then sets the `@Resource`-annotated field (EE), which **cannot** be `final`.
+
+Both injection points coexist in the same class with no conflict:
+
+```java
+@Inject                            // CDI — runs at construction time
+public AddNoteHandler(NoteService noteService,
+                      CreatorContext creatorContext,
+                      RequestContextController rcc) { … }
+
+@Resource(name = "creator/taskHandler")   // EE — runs post-construction
+private String taskHandlerCreatorName;    // cannot be final
+```
+
+**Namespace sharing across JARs:**
+
+The Camunda client module (`notes-camunda-client.jar`) lives in `WEB-INF/lib` of the WAR.
+All CDI beans in `WEB-INF/lib` JARs share the **WAR's** `java:comp/env` namespace, so
+env-entries declared in `web.xml` are accessible from `AddNoteHandler` even though it is
+packaged in a separate JAR module.
 
 ---
 
@@ -604,6 +679,31 @@ to Camunda's REST API at startup.
 **Consequences:**
 - `CamundaClientStartup` must wait for the Camunda engine to be ready before deploying, which
   is handled by a polling loop.
+
+### ADR-006: Creator Names Read via `@Resource` / `<env-entry>`, Not Hard-Coded
+
+**Context:** Two classes need a creator-name string: `NoteResource` (`"rest api"`) and
+`AddNoteHandler` (`"task handler"`). These strings could be hard-coded as constants,
+injected as CDI `@Produces String` with a qualifier, or read from JNDI via `@Resource`.
+
+**Decision:** Declare the strings as `<env-entry>` elements in `web.xml` and inject them
+with `@Resource(name="…")`.
+
+**Rationale:**
+
+| Option | Verdict |
+|---|---|
+| Hard-coded constants | Simple, but the value cannot be changed without recompiling. |
+| CDI `@Produces @Qualifier String` | Works, but requires a qualifier annotation per value and hides the fact that these are operational strings, not domain objects. |
+| `<env-entry>` + `@Resource` | Values live in the deployment descriptor; they can be overridden by the application server without touching Java sources. The EE standard approach for externalising string constants. |
+
+**Consequences:**
+- `@Resource` fields cannot be `final`, slightly weakening the immutability of the
+  affected beans. This is acceptable because these values are effectively constants set
+  once at deployment time.
+- All CDI beans in `WEB-INF/lib` JARs share the WAR's `java:comp/env` namespace, so
+  `AddNoteHandler` in `notes-camunda-client.jar` can read entries declared in `notes-war`'s
+  `web.xml` without any additional configuration.
 
 ---
 
@@ -724,3 +824,6 @@ and expose it via WildFly's management API or a dedicated health endpoint.
 | **RESTEasy** | The JAX-RS implementation bundled with WildFly. |
 | **Weld** | The CDI reference implementation, bundled with WildFly. |
 | **WildFly** | Open-source Jakarta EE 10 application server, developed by Red Hat. Used as the runtime for this application. |
+| **`@Resource`** | Jakarta EE annotation that injects a named resource from the JNDI namespace into a bean field. Processed by the EE container post-construction, so the annotated field cannot be `final`. |
+| **`<env-entry>`** | A `web.xml` / `ejb-jar.xml` element that binds a named string (or other primitive type) constant into `java:comp/env/`. The standard mechanism for externalising configuration values that `@Resource` can then inject. |
+| **`java:comp/env`** | The JNDI namespace reserved for component-level environment entries. Within a WAR deployment, all CDI beans (including those in `WEB-INF/lib` JARs) share the WAR's `java:comp/env` namespace. |

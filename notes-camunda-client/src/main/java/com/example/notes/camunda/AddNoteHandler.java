@@ -3,6 +3,7 @@ package com.example.notes.camunda;
 import com.example.notes.entity.Note;
 import com.example.notes.service.CreatorContext;
 import com.example.notes.service.NoteService;
+import jakarta.annotation.Resource;
 import jakarta.enterprise.context.Dependent;
 import jakarta.enterprise.context.control.RequestContextController;
 import jakarta.inject.Inject;
@@ -49,6 +50,18 @@ public class AddNoteHandler implements ExternalTaskHandler {
     private final CreatorContext creatorContext;
     private final RequestContextController requestContextController;
 
+    /**
+     * Injected by the EE container from java:comp/env/creator/taskHandler,
+     * declared as an <env-entry> in web.xml of the enclosing WAR.
+     *
+     * All CDI-managed beans in WEB-INF/lib share the WAR's java:comp/env
+     * namespace, so this @Resource field injection is processed by the EE
+     * container independently of the @Inject constructor below.
+     * The field cannot be final because @Resource is set after construction.
+     */
+    @Resource(name = "creator/taskHandler")
+    private String taskHandlerCreatorName;
+
     @Inject
     public AddNoteHandler(NoteService noteService,
                           CreatorContext creatorContext,
@@ -64,7 +77,7 @@ public class AddNoteHandler implements ExternalTaskHandler {
         // proxy can resolve to a real instance on this unmanaged thread.
         requestContextController.activate();
         try {
-            creatorContext.setCreatorName("task handler");
+            creatorContext.setCreatorName(taskHandlerCreatorName);
 
             String title   = externalTask.getVariable("title");
             String content = externalTask.getVariable("content");
