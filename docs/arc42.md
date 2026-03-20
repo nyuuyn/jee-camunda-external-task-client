@@ -523,39 +523,45 @@ Camunda's REST API with `deploy-changed-only=true`. This means:
 
 ### 8.8 EE Environment Entry Injection (`@Resource`)
 
-The creator name strings are configured as **named bindings** in WildFly's naming subsystem,
-making them server-level constants that are independent of any WAR deployment.
+The creator name strings use a **two-level indirection** so that the value is owned by the
+server while the WAR declares only a reference:
 
-**Configuration (docker/configure-wildfly.cli):**
+```
+@Resource(name="creator/restApi")
+  └─► java:comp/env/creator/restApi   ← <env-entry> + <lookup-name> in web.xml
+        └─► java:global/creator/restApi  ← WildFly naming binding in standalone.xml
+```
+
+**Level 1 — Server value (docker/configure-wildfly.cli):**
 
 ```
 /subsystem=naming/binding="java:global/creator/restApi":add(
     binding-type=simple, type=java.lang.String, value="rest api"
 )
-/subsystem=naming/binding="java:global/creator/taskHandler":add(
-    binding-type=simple, type=java.lang.String, value="task handler"
-)
 ```
 
-This writes entries into `standalone.xml` under the naming subsystem. They are visible to
-all deployed applications in the server and can be changed via WildFly CLI at any time
-without redeploying the WAR.
+Entries are persisted in `standalone.xml` and can be changed via WildFly CLI at any time
+without rebuilding or redeploying the WAR.
 
-**Why use server-level bindings instead of hard-coded strings or `web.xml` env-entries?**
+**Level 2 — WAR reference (web.xml):**
 
-The creator names are operational configuration, not business logic. Server-level bindings
-keep them out of the WAR entirely; an operator can change the values by running a single CLI
-command against the running server. `web.xml` env-entries would also externalise the values,
-but they require a WAR redeployment to change and are scoped to the deployment, not the server.
+`<env-entry>` with `<lookup-name>` (Servlet 3.0+) creates an alias inside `java:comp/env/`
+that resolves to the server-level binding. No `<env-entry-value>` is specified:
 
-**Where it is used:**
+```xml
+<env-entry>
+    <env-entry-name>creator/restApi</env-entry-name>
+    <env-entry-type>java.lang.String</env-entry-type>
+    <lookup-name>java:global/creator/restApi</lookup-name>
+</env-entry>
+```
 
-| Class | `lookup` value | Configured value |
-|---|---|---|
-| `NoteResource` | `java:global/creator/restApi` | `"rest api"` |
-| `AddNoteHandler` | `java:global/creator/taskHandler` | `"task handler"` |
+**Injection:**
 
-**Injection mechanics:**
+```java
+@Resource(name = "creator/taskHandler")   // EE — runs post-construction
+private String taskHandlerCreatorName;    // cannot be final
+```
 
 `@Resource` is processed by the EE container **after** the bean is constructed. This means:
 
@@ -570,16 +576,9 @@ public AddNoteHandler(NoteService noteService,
                       CreatorContext creatorContext,
                       RequestContextController rcc) { … }
 
-@Resource(lookup = "java:global/creator/taskHandler")   // EE — runs post-construction
-private String taskHandlerCreatorName;                  // cannot be final
+@Resource(name = "creator/taskHandler")   // EE — runs post-construction
+private String taskHandlerCreatorName;    // cannot be final
 ```
-
-**`name` vs `lookup` in `@Resource`:**
-
-- `@Resource(name = "creator/taskHandler")` — relative shorthand; always resolved under
-  `java:comp/env/` (only works for `<env-entry>` declarations in `web.xml`).
-- `@Resource(lookup = "java:global/creator/taskHandler")` — absolute JNDI path; used for
-  server-level bindings that exist outside any deployment descriptor.
 
 ---
 
@@ -701,9 +700,10 @@ to Camunda's REST API at startup.
 `AddNoteHandler` (`"task handler"`). These strings could be hard-coded as constants,
 declared as `<env-entry>` in `web.xml`, or configured as server-level JNDI bindings.
 
-**Decision:** Register the strings as named bindings in WildFly's naming subsystem under
-`java:global/creator/…` (via `docker/configure-wildfly.cli`) and inject them with
-`@Resource(lookup="java:global/…")`.
+**Decision:** Use a two-level indirection: register the actual values as WildFly naming
+bindings under `java:global/creator/…` (via `docker/configure-wildfly.cli`), and declare
+`<env-entry>` elements with `<lookup-name>` in `web.xml` that alias those bindings into
+the WAR's `java:comp/env/` namespace. Inject with `@Resource(name="creator/…")`.
 
 **Rationale:**
 
@@ -711,15 +711,16 @@ declared as `<env-entry>` in `web.xml`, or configured as server-level JNDI bindi
 |---|---|
 | Hard-coded constants | Simple, but the value cannot be changed without recompiling. |
 | CDI `@Produces @Qualifier String` | Works, but requires a qualifier annotation per value and blurs the distinction between domain beans and configuration strings. |
-| `<env-entry>` in `web.xml` | Externalises the value from source code, but it is still part of the WAR — changing it requires redeploying the application. |
-| WildFly naming binding (`java:global/`) | Value lives in `standalone.xml`; an operator can change it with a single CLI command against the running server, with no WAR rebuild or redeployment. |
+| `<env-entry>` with a literal value in `web.xml` | Externalises the value from source code, but it is still part of the WAR — changing it requires rebuilding and redeploying the application. |
+| WildFly naming binding + `<lookup-name>` alias | The value lives in `standalone.xml` and can be changed via WildFly CLI with no WAR rebuild. The WAR declares only a typed reference, not the value itself. |
 
 **Consequences:**
-- `@Resource` fields cannot be `final`, slightly weakening immutability. This is acceptable
-  because these values are effectively constants set once at server startup.
-- The binding must be present in WildFly before the WAR deploys, or deployment fails with
-  a missing-dependency error. The CLI script in `configure-wildfly.cli` ensures this at
-  image-build time.
+- `@Resource` fields cannot be `final`. This is acceptable because these values are
+  effectively constants set once at server startup.
+- The `java:global/` binding must be present in WildFly before the WAR deploys, or
+  deployment fails with a missing-dependency error. `configure-wildfly.cli` ensures this
+  at image-build time.
+- The `<lookup-name>` element requires Servlet 3.0 or later — satisfied by Jakarta EE 10.
 
 ---
 
@@ -840,6 +841,7 @@ and expose it via WildFly's management API or a dedicated health endpoint.
 | **RESTEasy** | The JAX-RS implementation bundled with WildFly. |
 | **Weld** | The CDI reference implementation, bundled with WildFly. |
 | **WildFly** | Open-source Jakarta EE 10 application server, developed by Red Hat. Used as the runtime for this application. |
-| **`@Resource`** | Jakarta EE annotation that injects a named resource from the JNDI namespace into a bean field. The `name` attribute is resolved relative to `java:comp/env/`; the `lookup` attribute accepts a full absolute JNDI path (e.g. `java:global/…`). Processed by the EE container post-construction, so the annotated field cannot be `final`. |
-| **`java:global/`** | The server-wide JNDI namespace in Jakarta EE. Bindings configured here are visible to all deployed applications and all their modules. WildFly populates this namespace from the `<bindings>` element in the naming subsystem of `standalone.xml`. |
-| **WildFly naming binding** | A `<simple-binding>` entry in WildFly's naming subsystem that maps a JNDI name to a literal value (string, integer, etc.). Configured via the WildFly CLI command `/subsystem=naming/binding=…:add(binding-type=simple, …)` and persisted in `standalone.xml`. |
+| **`@Resource`** | Jakarta EE annotation that injects a named resource from the JNDI namespace into a bean field. The `name` attribute is resolved relative to `java:comp/env/`; the `lookup` attribute accepts a full absolute JNDI path. Processed by the EE container post-construction, so the annotated field cannot be `final`. |
+| **`java:global/`** | The server-wide JNDI namespace in Jakarta EE. Bindings configured here are visible to all deployed applications. WildFly populates this namespace via the naming subsystem in `standalone.xml`. |
+| **`<lookup-name>`** | An `<env-entry>` child element (Servlet 3.0+) that replaces `<env-entry-value>` with a JNDI alias. The entry becomes a reference that resolves to another JNDI name at injection time, enabling indirection between the WAR's component namespace and a server-level binding. |
+| **WildFly naming binding** | An entry in WildFly's naming subsystem that maps a JNDI name to a literal value. Configured via `/subsystem=naming/binding=…:add(binding-type=simple, …)` and persisted in `standalone.xml`. |

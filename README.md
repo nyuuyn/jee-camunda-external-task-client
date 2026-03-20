@@ -310,44 +310,61 @@ Beyond CDI beans, Jakarta EE provides a second injection mechanism — `@Resourc
 configuration values. The creator name strings are configured as **WildFly naming bindings**
 in `standalone.xml` and injected via `@Resource(lookup="java:global/...")`.
 
-#### Configuring values in WildFly (docker/configure-wildfly.cli)
+#### Two-level lookup chain
 
-The values are registered in WildFly's naming subsystem at image-build time:
+The design uses an indirection so that the **value lives on the server** while the **WAR
+only declares a reference**:
 
 ```
-/subsystem=naming/binding="java:global/creator/restApi":add(
+@Resource(name="creator/restApi")
+  └─► java:comp/env/creator/restApi   ← env-entry in web.xml (reference, no value)
+        └─► java:global/creator/restApi  ← WildFly naming binding in standalone.xml (value)
+```
+
+#### Step 1 — Configure the value in WildFly (docker/configure-wildfly.cli)
+
+The actual strings are registered in WildFly's naming subsystem at image-build time:
+
+```
+/subsystem=naming/binding="java:global\/creator\/restApi":add(
     binding-type=simple, type=java.lang.String, value="rest api"
 )
-/subsystem=naming/binding="java:global/creator/taskHandler":add(
+/subsystem=naming/binding="java:global\/creator\/taskHandler":add(
     binding-type=simple, type=java.lang.String, value="task handler"
 )
 ```
 
-This writes two entries into `standalone.xml` under `<subsystem xmlns="urn:jboss:domain:naming:…">`.
-They are **server-level** constants — visible to all deployed applications and changeable via
-WildFly CLI without redeploying the WAR.
+This persists two entries in `standalone.xml`. They are **server-level** constants —
+visible to all deployed applications and changeable via WildFly CLI at any time.
 
-#### Injecting with @Resource
+#### Step 2 — Declare the reference in web.xml
 
-The EE container looks up the absolute JNDI path and sets the field **after** the bean is
-constructed. The `lookup` attribute is used because `java:global/` is an absolute path, not
-relative to `java:comp/env/`:
+`<env-entry>` with `<lookup-name>` (Servlet 3.0+) creates an alias inside the WAR's
+component namespace that points to the server-level binding. No `<env-entry-value>` is
+specified — the value comes entirely from WildFly:
+
+```xml
+<env-entry>
+    <env-entry-name>creator/restApi</env-entry-name>
+    <env-entry-type>java.lang.String</env-entry-type>
+    <lookup-name>java:global/creator/restApi</lookup-name>   <!-- no <env-entry-value> -->
+</env-entry>
+```
+
+#### Step 3 — Inject with @Resource
+
+The EE container resolves `name = "creator/restApi"` relative to `java:comp/env/`, follows
+the `<lookup-name>` alias, and sets the field **after** the bean is constructed:
 
 ```java
 // In NoteResource (JAX-RS resource, WAR CDI bean):
-@Resource(lookup = "java:global/creator/restApi")
+@Resource(name = "creator/restApi")
 private String restApiCreatorName;   // set by EE container, not CDI
 
 // In AddNoteHandler (@Dependent CDI bean, lives in WEB-INF/lib):
-@Resource(lookup = "java:global/creator/taskHandler")
+@Resource(name = "creator/taskHandler")
 private String taskHandlerCreatorName;
 ```
-
-> **`name` vs `lookup` in `@Resource`:**
-> - `name = "creator/restApi"` — relative shorthand, always resolved under `java:comp/env/`
->   (only works for `<env-entry>` / `<resource-ref>` declarations in `web.xml`)
-> - `lookup = "java:global/creator/restApi"` — absolute JNDI path; used for server-level
->   bindings that exist outside the deployment descriptor
 
 #### Coexistence of @Resource and @Inject in AddNoteHandler
 
@@ -359,22 +376,16 @@ combined in the same class without conflict:
 | `@Inject` (constructor) | CDI (Weld) | At bean instantiation | `final` — immutable |
 | `@Resource` (field) | EE container | After construction | Non-`final` — set once, never changed |
 
-This means `AddNoteHandler` uses constructor injection for its CDI dependencies
-(`NoteService`, `CreatorContext`, `RequestContextController`) and field injection via
-`@Resource` for the configuration string — each mechanism doing what it is best suited for.
-
 #### Changing the values without recompiling
 
-Because the bindings live in WildFly's `standalone.xml` rather than in application code,
-they can be updated at runtime via the WildFly CLI:
+Because the actual value lives in WildFly's `standalone.xml`, it can be updated via the
+WildFly CLI against a running server — no WAR rebuild or redeployment required:
 
 ```
 /subsystem=naming/binding="java:global\/creator\/restApi":write-attribute(
     name=value, value="new name"
 )
 ```
-
-No WAR rebuild or redeployment is required.
 
 ---
 

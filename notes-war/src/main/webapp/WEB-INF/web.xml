@@ -6,10 +6,30 @@
          version="6.0">
 
     <!--
-      Creator name strings are no longer declared here as <env-entry> elements.
-      They are configured as naming bindings in WildFly's standalone.xml
-      (see docker/configure-wildfly.cli) under java:global/creator/ and
-      injected via @Resource(lookup="java:global/creator/...").
+      These env-entries do NOT embed a value.  Instead, <lookup-name> makes
+      each entry an alias that resolves to a binding in WildFly's global JNDI
+      namespace (java:global/creator/…) configured in standalone.xml via the
+      CLI script in docker/configure-wildfly.cli.
+
+      Lookup chain at injection time:
+        @Resource(name="creator/restApi")
+          → java:comp/env/creator/restApi   (this file)
+            → java:global/creator/restApi   (WildFly standalone.xml)
+
+      Benefit: the WAR declares only a reference; the actual value lives on
+      the application server and can be changed via WildFly CLI without
+      rebuilding or redeploying the application.
     -->
+    <env-entry>
+        <env-entry-name>creator/restApi</env-entry-name>
+        <env-entry-type>java.lang.String</env-entry-type>
+        <lookup-name>java:global/creator/restApi</lookup-name>
+    </env-entry>
+
+    <env-entry>
+        <env-entry-name>creator/taskHandler</env-entry-name>
+        <env-entry-type>java.lang.String</env-entry-type>
+        <lookup-name>java:global/creator/taskHandler</lookup-name>
+    </env-entry>
 
 </web-app>
