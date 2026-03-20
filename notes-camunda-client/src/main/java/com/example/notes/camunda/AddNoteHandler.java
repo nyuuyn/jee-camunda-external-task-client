@@ -52,15 +52,16 @@ public class AddNoteHandler implements ExternalTaskHandler {
 
     /**
      * Resolved via the lookup chain:
-     *   @Resource(name="creator/taskHandler")
-     *     → java:comp/env/creator/taskHandler  (env-entry in web.xml)
+     *   @Resource(lookup="java:app/creator/taskHandler")
+     *     → java:app/creator/taskHandler       (resource-ref in application.xml, EAR scope)
      *       → java:global/creator/taskHandler  (WildFly naming binding in standalone.xml)
      *
-     * The <lookup-name> in web.xml makes this entry an alias; no value is
-     * hardcoded in the WAR.  @Resource is processed by the EE container after
-     * construction, so the field cannot be final.
+     * The lookup path matches <res-ref-name> in application.xml; no value is
+     * hardcoded in the WAR or the EAR descriptor.
+     * @Resource is processed by the EE container after construction, so the
+     * field cannot be final.
      */
-    @Resource(name = "creator/taskHandler")
+    @Resource(lookup = "java:app/creator/taskHandler")
     private String taskHandlerCreatorName;
 
     @Inject

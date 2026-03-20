@@ -20,12 +20,17 @@
             <groupId>jakarta.platform</groupId>
             <artifactId>jakarta.jakartaee-api</artifactId>
         </dependency>
-        <!-- Include EJB module classes in WEB-INF/lib -->
+        <!--
+          notes-ejb is on the compile classpath but excluded from WEB-INF/lib.
+          In the EAR deployment it lives at EAR root and is shared with the WAR
+          via the EAR classloader.
+        -->
         <dependency>
             <groupId>com.example</groupId>
             <artifactId>notes-ejb</artifactId>
             <version>1.0.0-SNAPSHOT</version>
             <type>ejb</type>
+            <scope>provided</scope>
         </dependency>
         <!-- Camunda External Task Client + startup bean + BPMN resource -->
         <dependency>

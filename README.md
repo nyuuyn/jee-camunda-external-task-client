@@ -32,8 +32,8 @@ managed (servlet) request contexts and unmanaged (Camunda worker) threads.
 .
 ├── docker-compose.yml                  # Starts postgres, camunda, wildfly
 ├── docker/
-│   ├── Dockerfile                      # 2-stage: configure WildFly + deploy WAR
-│   ├── configure-wildfly.cli           # Adds PostgreSQL module & datasource
+│   ├── Dockerfile                      # 2-stage: configure WildFly + deploy EAR
+│   ├── configure-wildfly.cli           # Adds PostgreSQL module, datasource & java:global/ bindings
 │   └── postgres-init/
 │       └── 01-create-camundadb.sh      # Idempotently creates camundadb on first start
 │
@@ -53,15 +53,19 @@ managed (servlet) request contexts and unmanaged (Camunda worker) threads.
 │           ├── add-note-process.bpmn       # BPMN process definition
 │           └── META-INF/ejb-jar.xml        # Marker: tells WildFly to scan JAR for EJBs
 │
-└── notes-war/                          # WAR module – JAX-RS REST API
-    └── src/main/
-        ├── java/com/example/notes/web/
-        │   ├── JaxRsActivator.java     # @ApplicationPath("/api")
-        │   ├── JacksonConfig.java      # Registers JavaTimeModule for LocalDateTime
-        │   ├── NoteRequest.java        # Request DTO
-        │   └── NoteResource.java       # REST endpoints
-        └── webapp/WEB-INF/
-            └── web.xml                 # <env-entry> bindings for creator names
+├── notes-war/                          # WAR module – JAX-RS REST API
+│   └── src/main/
+│       ├── java/com/example/notes/web/
+│       │   ├── JaxRsActivator.java     # @ApplicationPath("/api")
+│       │   ├── JacksonConfig.java      # Registers JavaTimeModule for LocalDateTime
+│       │   ├── NoteRequest.java        # Request DTO
+│       │   └── NoteResource.java       # REST endpoints
+│       └── webapp/WEB-INF/
+│           └── web.xml                 # Minimal; resource-refs are declared in the EAR
+│
+└── notes-ear/                          # EAR module – packages everything for deployment
+    └── src/main/application/META-INF/
+        └── application.xml             # EAR descriptor: modules + java:app/ resource-refs
 ```
 
 ---
@@ -270,7 +274,7 @@ public class AddNoteHandler implements ExternalTaskHandler {
     private final RequestContextController requestContextController;
 
     // EE container injection — set after construction, cannot be final (see below)
-    @Resource(lookup = "java:app/env/creator/taskHandler")
+    @Resource(lookup = "java:app/creator/taskHandler")
     private String taskHandlerCreatorName;
 
     @Inject  // ← CDI constructor injection
@@ -307,19 +311,20 @@ Constructor injection with `final` fields is cleaner and the intent is clear.
 
 Beyond CDI beans, Jakarta EE provides a second injection mechanism — `@Resource` — for
 **container-managed resources** such as datasources, JMS destinations, and named
-configuration values. The creator name strings are configured as **WildFly naming bindings**
-in `standalone.xml` and injected via `@Resource(lookup="java:global/...")`.
+configuration values. The creator name strings use a **three-level lookup chain** that
+separates the server-owned value, the EAR-level reference declaration, and the injection site.
 
-#### Two-level lookup chain
-
-The design uses an indirection so that the **value lives on the server** while the **WAR
-only declares a reference**:
+#### Three-level lookup chain
 
 ```
-@Resource(name="creator/restApi")
-  └─► java:comp/env/creator/restApi   ← env-entry in web.xml (reference, no value)
+@Resource(lookup="java:app/creator/restApi")
+  └─► java:app/creator/restApi       ← resource-ref in application.xml (EAR scope)
         └─► java:global/creator/restApi  ← WildFly naming binding in standalone.xml (value)
 ```
+
+- The **value** lives on the server and is never part of any build artifact.
+- The **EAR** declares a typed reference visible to all its modules (`java:app/` namespace).
+- The **WAR and EJB JARs** inject via `@Resource(lookup="java:app/...")` — no values in code.
 
 #### Step 1 — Configure the value in WildFly (docker/configure-wildfly.cli)
 
@@ -334,35 +339,36 @@ The actual strings are registered in WildFly's naming subsystem at image-build t
 )
 ```
 
-This persists two entries in `standalone.xml`. They are **server-level** constants —
-visible to all deployed applications and changeable via WildFly CLI at any time.
+These entries are persisted in `standalone.xml` and can be changed via WildFly CLI at any
+time without touching the EAR.
 
-#### Step 2 — Declare the reference in web.xml
+#### Step 2 — Declare resource-refs in application.xml (EAR scope)
 
-`<env-entry>` with `<lookup-name>` (Servlet 3.0+) creates an alias inside the WAR's
-component namespace that points to the server-level binding. No `<env-entry-value>` is
-specified — the value comes entirely from WildFly:
+`<resource-ref>` elements in `application.xml` register the references in the `java:app/`
+namespace — the application-scoped JNDI namespace shared by **every module in the EAR**
+(WAR, EJB JARs, and `WEB-INF/lib` JARs). `<lookup-name>` points to the server binding:
 
 ```xml
-<env-entry>
-    <env-entry-name>creator/restApi</env-entry-name>
-    <env-entry-type>java.lang.String</env-entry-type>
-    <lookup-name>java:global/creator/restApi</lookup-name>   <!-- no <env-entry-value> -->
-</env-entry>
+<resource-ref>
+    <res-ref-name>java:app/creator/restApi</res-ref-name>
+    <res-type>java.lang.String</res-type>
+    <res-auth>Application</res-auth>
+    <lookup-name>java:global/creator/restApi</lookup-name>
+</resource-ref>
 ```
 
 #### Step 3 — Inject with @Resource
 
-The EE container resolves `name = "creator/restApi"` relative to `java:comp/env/`, follows
-the `<lookup-name>` alias, and sets the field **after** the bean is constructed:
+The EE container resolves the absolute `java:app/` path, follows the `<lookup-name>` alias
+to the server binding, and sets the field **after** the bean is constructed:
 
 ```java
 // In NoteResource (JAX-RS resource, WAR CDI bean):
-@Resource(name = "creator/restApi")
+@Resource(lookup = "java:app/creator/restApi")
 private String restApiCreatorName;   // set by EE container, not CDI
 
-// In AddNoteHandler (@Dependent CDI bean, lives in WEB-INF/lib):
-@Resource(name = "creator/taskHandler")
+// In AddNoteHandler (@Dependent CDI bean, lives in WEB-INF/lib of the WAR):
+@Resource(lookup = "java:app/creator/taskHandler")
 private String taskHandlerCreatorName;
 ```
 
@@ -379,7 +385,7 @@ combined in the same class without conflict:
 #### Changing the values without recompiling
 
 Because the actual value lives in WildFly's `standalone.xml`, it can be updated via the
-WildFly CLI against a running server — no WAR rebuild or redeployment required:
+WildFly CLI against a running server — no EAR rebuild or redeployment required:
 
 ```
 /subsystem=naming/binding="java:global\/creator\/restApi":write-attribute(

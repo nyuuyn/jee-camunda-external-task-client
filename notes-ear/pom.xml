@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.example</groupId>
+        <artifactId>notes-app</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>notes-ear</artifactId>
+    <packaging>ear</packaging>
+
+    <name>Notes App - EAR</name>
+
+    <dependencies>
+        <!-- EJB module: placed at EAR root, shared with the WAR via EAR classloader -->
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>notes-ejb</artifactId>
+            <version>${project.version}</version>
+            <type>ejb</type>
+        </dependency>
+
+        <!--
+          Web module: the WAR already bundles notes-camunda-client.jar in
+          WEB-INF/lib, so the Camunda client and its @Singleton @Startup EJB
+          are carried along automatically.
+        -->
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>notes-war</artifactId>
+            <version>${project.version}</version>
+            <type>war</type>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>notes</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-ear-plugin</artifactId>
+                <version>3.3.0</version>
+                <configuration>
+                    <!--
+                      We supply a hand-written application.xml in
+                      src/main/application/META-INF/application.xml that
+                      includes both the module declarations and EAR-level
+                      env-entries pointing to WildFly global JNDI bindings.
+                      Disable auto-generation so our custom file is used.
+                    -->
+                    <generateApplicationXml>false</generateApplicationXml>
+                    <modules>
+                        <ejbModule>
+                            <groupId>com.example</groupId>
+                            <artifactId>notes-ejb</artifactId>
+                            <bundleFileName>notes-ejb.jar</bundleFileName>
+                        </ejbModule>
+                        <webModule>
+                            <groupId>com.example</groupId>
+                            <artifactId>notes-war</artifactId>
+                            <bundleFileName>notes.war</bundleFileName>
+                            <!-- preserve the same context root as the standalone WAR deployment -->
+                            <contextRoot>/notes</contextRoot>
+                        </webModule>
+                    </modules>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

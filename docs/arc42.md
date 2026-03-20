@@ -157,7 +157,8 @@ unmanaged threads used by the External Task Client.
 | **Request context on an unmanaged thread** | `AddNoteHandler.execute()` uses `RequestContextController.activate()` / `deactivate()` to open and close a synthetic request context around each task execution, making `@RequestScoped` beans usable on Camunda's worker threads. |
 | **Bootstrapping the External Task Client inside WildFly** | A `@Singleton @Startup` EJB (`CamundaClientStartup`) starts the client using a `ManagedExecutorService` to respect the EJB threading model. |
 | **BPMN process deployment** | The startup EJB deploys the bundled BPMN resource to the Camunda engine via its REST API on every application start (`deploy-changed-only=true` prevents redundant re-deployments). |
-| **Externalised configuration for creator names** | Creator name strings are registered as named bindings in WildFly's naming subsystem (`java:global/creator/…`) and injected via `@Resource(lookup="java:global/…")`. Values live in `standalone.xml` and can be changed via WildFly CLI without rebuilding or redeploying the WAR. |
+| **Externalised configuration for creator names** | Values are WildFly naming bindings (`java:global/creator/…` in `standalone.xml`). The EAR's `application.xml` declares `<resource-ref>` elements under `java:app/creator/…` that alias those bindings. Code injects via `@Resource(lookup="java:app/creator/…")`. Changing a value requires only a WildFly CLI command — no rebuild or redeployment. |
+| **EAR packaging** | All modules are assembled into a single EAR (`notes-ear`). `notes-ejb.jar` is placed at the EAR root as an EJB module; `notes.war` is the web module and carries `notes-camunda-client.jar` in its `WEB-INF/lib`. |
 | **Containerised operation** | Docker Compose with a healthcheck dependency chain: postgres → camunda → wildfly. |
 
 ---
@@ -210,7 +211,8 @@ notes-camunda-client
 ├── AddNoteHandler             @Dependent ExternalTaskHandler
 │                             @Inject constructor: NoteService, CreatorContext,
 │                             RequestContextController (CDI, final fields).
-│                             @Resource field: taskHandlerCreatorName (EE env-entry).
+│                             @Resource field: taskHandlerCreatorName
+│                             (lookup="java:app/creator/taskHandler").
 │                             Activates request context → sets CreatorContext →
 │                             calls NoteService → completes or fails the task.
 │
@@ -225,26 +227,23 @@ notes-camunda-client
 notes-war
 ├── JaxRsActivator             @ApplicationPath("/api") — activates JAX-RS
 ├── NoteResource               @Path("/notes") — GET, POST, PUT, DELETE
-│                             @Resource field: restApiCreatorName (EE env-entry).
+│                             @Resource field: restApiCreatorName
+│                             (lookup="java:app/creator/restApi").
 │                             Sets CreatorContext to restApiCreatorName before POST.
 ├── NoteRequest                Plain DTO for the POST/PUT request body
 ├── JacksonConfig              @Provider ContextResolver<ObjectMapper>
 │                             Registers JavaTimeModule so LocalDateTime serialises
 │                             as ISO-8601 strings rather than numeric arrays.
-└── WEB-INF/web.xml            Declares two <env-entry> bindings:
-                                creator/restApi     → "rest api"
-                                creator/taskHandler → "task handler"
-                              Bound into java:comp/env/; shared by all CDI beans
-                              in this WAR, including those in WEB-INF/lib JARs.
+└── WEB-INF/web.xml            Minimal; resource-refs are declared at EAR level.
 ```
 
 ### 5.5 Level 3 — Key Class Interactions
 
 ```
-  web.xml env-entries
-  java:comp/env/
-  ├─ creator/restApi ──────@Resource──► NoteResource.restApiCreatorName
-  └─ creator/taskHandler ──@Resource──► AddNoteHandler.taskHandlerCreatorName
+  application.xml resource-refs (java:app/)
+  ├─ java:app/creator/restApi ──────@Resource(lookup)──► NoteResource.restApiCreatorName
+  └─ java:app/creator/taskHandler ──@Resource(lookup)──► AddNoteHandler.taskHandlerCreatorName
+       └─► java:global/creator/… (WildFly standalone.xml)
 
 NoteResource                    AddNoteHandler
     │  @Inject                      │  @Inject (constructor)
@@ -266,6 +265,24 @@ NoteResource                    AddNoteHandler
               │                    or "task handler"
               ▼
          PostgreSQL
+```
+
+### 5.6 Level 2 — notes-ear
+
+```
+notes-ear
+├── META-INF/application.xml   EAR descriptor: declares modules and EAR-level resource-refs.
+│                              <resource-ref> entries bind java:app/creator/restApi and
+│                              java:app/creator/taskHandler as aliases that resolve to
+│                              java:global/creator/… in WildFly's naming subsystem.
+│
+├── notes-ejb.jar              EJB module at EAR root.
+│                              Accessible to the WAR via the EAR classloader.
+│
+└── notes.war                  Web module (context-root: /notes).
+                               Contains notes-camunda-client.jar in WEB-INF/lib so
+                               CamundaClientStartup and AddNoteHandler share the WAR's
+                               CDI context and can access the java:app/ resource-refs.
 ```
 
 ---
@@ -448,7 +465,7 @@ two injection mechanisms coexist in the same class without conflict:
 private final NoteService noteService;
 
 // EE container — set after construction, not final
-@Resource(lookup = "java:app/env/creator/taskHandler")
+@Resource(lookup = "java:app/creator/taskHandler")
 private String taskHandlerCreatorName;
 ```
 
@@ -523,12 +540,12 @@ Camunda's REST API with `deploy-changed-only=true`. This means:
 
 ### 8.8 EE Environment Entry Injection (`@Resource`)
 
-The creator name strings use a **two-level indirection** so that the value is owned by the
-server while the WAR declares only a reference:
+The creator name strings use a **three-level indirection** that cleanly separates the
+server-owned value, the EAR-level reference, and the injection site.
 
 ```
-@Resource(name="creator/restApi")
-  └─► java:comp/env/creator/restApi   ← <env-entry> + <lookup-name> in web.xml
+@Resource(lookup="java:app/creator/restApi")
+  └─► java:app/creator/restApi       ← <resource-ref> in application.xml (EAR scope)
         └─► java:global/creator/restApi  ← WildFly naming binding in standalone.xml
 ```
 
@@ -541,29 +558,26 @@ server while the WAR declares only a reference:
 ```
 
 Entries are persisted in `standalone.xml` and can be changed via WildFly CLI at any time
-without rebuilding or redeploying the WAR.
+without touching the EAR.
 
-**Level 2 — WAR reference (web.xml):**
+**Level 2 — EAR reference (notes-ear/src/main/application/META-INF/application.xml):**
 
-`<env-entry>` with `<lookup-name>` (Servlet 3.0+) creates an alias inside `java:comp/env/`
-that resolves to the server-level binding. No `<env-entry-value>` is specified:
+`<resource-ref>` in `application.xml` registers the reference in the `java:app/` namespace —
+the application-scoped JNDI context shared by every module in the EAR. `<lookup-name>` aliases
+it to the server-level binding:
 
 ```xml
-<env-entry>
-    <env-entry-name>creator/restApi</env-entry-name>
-    <env-entry-type>java.lang.String</env-entry-type>
+<resource-ref>
+    <res-ref-name>java:app/creator/restApi</res-ref-name>
+    <res-type>java.lang.String</res-type>
+    <res-auth>Application</res-auth>
     <lookup-name>java:global/creator/restApi</lookup-name>
-</env-entry>
+</resource-ref>
 ```
 
-**Injection:**
+**Level 3 — Injection:**
 
-```java
-@Resource(name = "creator/taskHandler")   // EE — runs post-construction
-private String taskHandlerCreatorName;    // cannot be final
-```
-
-`@Resource` is processed by the EE container **after** the bean is constructed. This means:
+`@Resource` is processed by the EE container **after** the bean is constructed:
 
 1. The container calls the `@Inject` constructor (CDI), setting all `final` fields.
 2. The container then sets the `@Resource`-annotated field (EE), which **cannot** be `final`.
@@ -571,13 +585,13 @@ private String taskHandlerCreatorName;    // cannot be final
 Both injection points coexist in the same class with no conflict:
 
 ```java
-@Inject                            // CDI — runs at construction time
+@Inject                                        // CDI — runs at construction time
 public AddNoteHandler(NoteService noteService,
                       CreatorContext creatorContext,
                       RequestContextController rcc) { … }
 
-@Resource(name = "creator/taskHandler")   // EE — runs post-construction
-private String taskHandlerCreatorName;    // cannot be final
+@Resource(lookup = "java:app/creator/taskHandler")   // EE — runs post-construction
+private String taskHandlerCreatorName;               // cannot be final
 ```
 
 ---
@@ -655,24 +669,30 @@ synthetic request context at the start of each `execute()` invocation and close 
 
 ---
 
-### ADR-004: Single WAR Deployment (no EAR)
+### ADR-004: EAR Deployment with notes-ejb at EAR Root
 
-**Context:** The project has three Maven modules. A conventional JEE multi-module project often
-produces an EAR that contains an EJB JAR and a WAR.
+**Context:** The project has four Maven modules. The application needs a deployment unit that
+supports EAR-level JNDI resource declarations (`java:app/` namespace) shared across all modules.
 
-**Decision:** Package everything into a single WAR. The EJB JAR and the Camunda client JAR are
-placed in `WEB-INF/lib`.
+**Decision:** Package the application as an EAR (`notes-ear`). `notes-ejb.jar` is placed at
+the EAR root as a dedicated EJB module. `notes.war` is the web module and continues to carry
+`notes-camunda-client.jar` in its `WEB-INF/lib`.
 
 **Rationale:**
-- WildFly supports EJBs inside `WEB-INF/lib` JARs of a WAR deployment (triggered by
-  `META-INF/ejb-jar.xml` inside the JAR).
-- A single WAR is simpler to build, deploy, and understand for a reference implementation.
-- An EAR would be appropriate when multiple WARs need to share EJB components, which is not
-  the case here.
+- EAR-level `application.xml` supports `<resource-ref>` declarations that are bound into the
+  `java:app/` namespace — the application-scoped JNDI context shared by all modules. This is
+  not achievable with a standalone WAR deployment.
+- Placing `notes-ejb.jar` at the EAR root (not in `WEB-INF/lib`) is the standard EAR
+  structure and makes the domain module clearly visible as a first-class EJB module.
+- Keeping `notes-camunda-client.jar` inside `WEB-INF/lib` of the WAR preserves the existing
+  CDI and `@Resource` injection behaviour without requiring changes to that module.
 
 **Consequences:**
-- An `META-INF/ejb-jar.xml` marker file is required in `notes-camunda-client.jar` to instruct
-  WildFly's EJB subsystem to scan that JAR for `@Singleton @Startup`.
+- `notes-ejb` must be `provided` scope in `notes-war/pom.xml` so it is not duplicated in
+  `WEB-INF/lib` (it is already at the EAR root).
+- The `notes-ear` module must be built last in the reactor (declared last in the parent POM).
+- `META-INF/ejb-jar.xml` in `notes-camunda-client.jar` is still required so WildFly scans
+  that `WEB-INF/lib` JAR for `@Singleton @Startup`.
 
 ---
 
@@ -694,33 +714,32 @@ to Camunda's REST API at startup.
 - `CamundaClientStartup` must wait for the Camunda engine to be ready before deploying, which
   is handled by a polling loop.
 
-### ADR-006: Creator Names as WildFly Naming Bindings (`java:global/`), Not Hard-Coded
+### ADR-006: Creator Names via WildFly Global Bindings + EAR-Level resource-refs
 
 **Context:** Two classes need a creator-name string: `NoteResource` (`"rest api"`) and
-`AddNoteHandler` (`"task handler"`). These strings could be hard-coded as constants,
-declared as `<env-entry>` in `web.xml`, or configured as server-level JNDI bindings.
+`AddNoteHandler` (`"task handler"`). These strings could be hard-coded, declared as
+`<env-entry>` in `web.xml`, configured as server-level JNDI bindings, or declared as
+`<resource-ref>` in the EAR's `application.xml`.
 
-**Decision:** Use a two-level indirection: register the actual values as WildFly naming
-bindings under `java:global/creator/…` (via `docker/configure-wildfly.cli`), and declare
-`<env-entry>` elements with `<lookup-name>` in `web.xml` that alias those bindings into
-the WAR's `java:comp/env/` namespace. Inject with `@Resource(name="creator/…")`.
+**Decision:** Use a three-level indirection:
+1. Register actual values as WildFly naming bindings at `java:global/creator/…` (`configure-wildfly.cli`).
+2. Declare `<resource-ref>` elements in `application.xml` under `java:app/creator/…` that alias the global bindings.
+3. Inject with `@Resource(lookup="java:app/creator/…")`.
 
 **Rationale:**
 
 | Option | Verdict |
 |---|---|
-| Hard-coded constants | Simple, but the value cannot be changed without recompiling. |
-| CDI `@Produces @Qualifier String` | Works, but requires a qualifier annotation per value and blurs the distinction between domain beans and configuration strings. |
-| `<env-entry>` with a literal value in `web.xml` | Externalises the value from source code, but it is still part of the WAR — changing it requires rebuilding and redeploying the application. |
-| WildFly naming binding + `<lookup-name>` alias | The value lives in `standalone.xml` and can be changed via WildFly CLI with no WAR rebuild. The WAR declares only a typed reference, not the value itself. |
+| Hard-coded constants | Value cannot be changed without recompiling. |
+| CDI `@Produces @Qualifier String` | Requires a qualifier annotation per value; blurs the line between domain beans and configuration strings. |
+| `<env-entry>` with a literal value in `web.xml` | Value is part of the WAR — changing it requires a WAR rebuild and redeployment. |
+| WildFly global binding only (`java:global/`) | Value on the server ✓, but uses the global namespace rather than the semantically correct application-scoped `java:app/` namespace. |
+| WildFly global binding + EAR `<resource-ref>` | Value on the server ✓, reference declared at application scope (`java:app/`) ✓, injection point is clean and standard ✓. |
 
 **Consequences:**
-- `@Resource` fields cannot be `final`. This is acceptable because these values are
-  effectively constants set once at server startup.
-- The `java:global/` binding must be present in WildFly before the WAR deploys, or
-  deployment fails with a missing-dependency error. `configure-wildfly.cli` ensures this
-  at image-build time.
-- The `<lookup-name>` element requires Servlet 3.0 or later — satisfied by Jakarta EE 10.
+- `@Resource` fields cannot be `final`. Acceptable — these values are constants set once at startup.
+- The `java:global/` binding must exist before the EAR deploys. `configure-wildfly.cli` guarantees this at image-build time.
+- The `<resource-ref>` in `application.xml` must reference the exact JNDI path used in `@Resource(lookup=…)`, otherwise WildFly reports a missing dependency at deploy time.
 
 ---
 
@@ -843,5 +862,7 @@ and expose it via WildFly's management API or a dedicated health endpoint.
 | **WildFly** | Open-source Jakarta EE 10 application server, developed by Red Hat. Used as the runtime for this application. |
 | **`@Resource`** | Jakarta EE annotation that injects a named resource from the JNDI namespace into a bean field. The `name` attribute is resolved relative to `java:comp/env/`; the `lookup` attribute accepts a full absolute JNDI path. Processed by the EE container post-construction, so the annotated field cannot be `final`. |
 | **`java:global/`** | The server-wide JNDI namespace in Jakarta EE. Bindings configured here are visible to all deployed applications. WildFly populates this namespace via the naming subsystem in `standalone.xml`. |
-| **`<lookup-name>`** | An `<env-entry>` child element (Servlet 3.0+) that replaces `<env-entry-value>` with a JNDI alias. The entry becomes a reference that resolves to another JNDI name at injection time, enabling indirection between the WAR's component namespace and a server-level binding. |
-| **WildFly naming binding** | An entry in WildFly's naming subsystem that maps a JNDI name to a literal value. Configured via `/subsystem=naming/binding=…:add(binding-type=simple, …)` and persisted in `standalone.xml`. |
+| **`java:app/`** | The application-scoped JNDI namespace in Jakarta EE. References declared here are visible to every module within the same EAR (WAR, EJB JARs, and `WEB-INF/lib` JARs). Declared via `<resource-ref>` in the EAR's `application.xml`. |
+| **`<resource-ref>`** | A Jakarta EE deployment descriptor element that declares a reference to a resource. When placed in the EAR's `application.xml` with a `<res-ref-name>` prefixed `java:app/`, it registers the reference in the application-scoped JNDI namespace. `<lookup-name>` aliases it to another JNDI name (e.g. a `java:global/` server binding). |
+| **EAR (Enterprise Application aRchive)** | A Jakarta EE packaging format (`.ear`) that bundles multiple modules — EJB JARs, WARs, and utility JARs — into a single deployable unit. Enables EAR-level JNDI declarations (`java:app/` namespace) shared across all contained modules. |
+| **WildFly naming binding** | An entry in WildFly's naming subsystem that maps a JNDI name to a literal value. Configured via `/subsystem=naming/binding=…:add(binding-type=simple, …)` and persisted in `standalone.xml`. WildFly supports bindings only in `java:global/`, `java:jboss/`, or `java:/` — not in `java:app/`. |

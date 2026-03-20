@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<application xmlns="https://jakarta.ee/xml/ns/jakartaee"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
+                                 https://jakarta.ee/xml/ns/jakartaee/application_9.xsd"
+             version="9">
+
+    <display-name>notes-ear</display-name>
+
+    <module>
+        <ejb>notes-ejb.jar</ejb>
+    </module>
+    <module>
+        <web>
+            <web-uri>notes.war</web-uri>
+            <context-root>/notes</context-root>
+        </web>
+    </module>
+
+    <!--
+      EAR-level resource-refs: bound into java:app/env/ and therefore accessible
+      from every component in this EAR (WAR, EJB JARs, and WEB-INF/lib JARs).
+
+      Each ref uses <lookup-name> to alias the EAR-level reference to the
+      server-level JNDI binding configured in WildFly's standalone.xml
+      (see docker/configure-wildfly.cli).
+
+      Lookup chain:
+        @Resource(lookup="java:app/creator/restApi")
+          -> java:app/creator/restApi       (EAR scope, this file)
+            -> java:global/creator/restApi  (WildFly standalone.xml)
+    -->
+    <resource-ref>
+        <res-ref-name>java:app/creator/restApi</res-ref-name>
+        <res-type>java.lang.String</res-type>
+        <res-auth>Application</res-auth>
+        <lookup-name>java:global/creator/restApi</lookup-name>
+    </resource-ref>
+
+    <resource-ref>
+        <res-ref-name>java:app/creator/taskHandler</res-ref-name>
+        <res-type>java.lang.String</res-type>
+        <res-auth>Application</res-auth>
+        <lookup-name>java:global/creator/taskHandler</lookup-name>
+    </resource-ref>
+
+</application>

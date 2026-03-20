@@ -20,8 +20,8 @@ FROM quay.io/wildfly/wildfly:32.0.0.Final-jdk17
 # Copy the pre-configured WildFly from the builder stage
 COPY --from=builder /opt/jboss/wildfly /opt/jboss/wildfly
 
-# Deploy the application WAR
-COPY notes-war/target/notes.war /opt/jboss/wildfly/standalone/deployments/
+# Deploy the application EAR
+COPY notes-ear/target/notes.ear /opt/jboss/wildfly/standalone/deployments/
 
 EXPOSE 8080 9990
 
