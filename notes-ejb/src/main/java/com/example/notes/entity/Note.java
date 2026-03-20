@@ -17,6 +17,9 @@ public class Note {
     @Column(length = 4000)
     private String content;
 
+    @Column(name = "creator_name", length = 100)
+    private String creatorName;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
@@ -43,6 +46,14 @@ public class Note {
 
     public void setContent(String content) {
         this.content = content;
+    }
+
+    public String getCreatorName() {
+        return creatorName;
+    }
+
+    public void setCreatorName(String creatorName) {
+        this.creatorName = creatorName;
     }
 
     public LocalDateTime getCreatedAt() {

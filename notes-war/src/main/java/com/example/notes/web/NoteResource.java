@@ -1,6 +1,7 @@
 package com.example.notes.web;
 
 import com.example.notes.entity.Note;
+import com.example.notes.service.CreatorContext;
 import com.example.notes.service.NoteService;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -16,6 +17,13 @@ public class NoteResource {
 
     @Inject
     private NoteService noteService;
+
+    /**
+     * The servlet container activates the @RequestScoped context for every
+     * incoming HTTP request, so this injection is always safe here.
+     */
+    @Inject
+    private CreatorContext creatorContext;
 
     @GET
     public List<Note> getAll() {
@@ -39,6 +47,7 @@ public class NoteResource {
                            .entity("{\"error\":\"title is required\"}")
                            .build();
         }
+        creatorContext.setCreatorName("rest api");
         Note note = noteService.createNote(request.getTitle(), request.getContent());
         return Response.status(Response.Status.CREATED).entity(note).build();
     }

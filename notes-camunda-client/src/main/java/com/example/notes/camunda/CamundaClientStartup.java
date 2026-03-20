@@ -1,6 +1,5 @@
 package com.example.notes.camunda;
 
-import com.example.notes.service.NoteService;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.annotation.Resource;
@@ -35,8 +34,12 @@ public class CamundaClientStartup {
     static final String CAMUNDA_BASE_URL = "http://camunda:8080/engine-rest";
     private static final String BOUNDARY  = "----NotesAppBoundary";
 
+    /**
+     * CDI creates AddNoteHandler (@Dependent) and injects NoteService,
+     * CreatorContext and RequestContextController into it automatically.
+     */
     @Inject
-    private NoteService noteService;
+    private AddNoteHandler addNoteHandler;
 
     /** Jakarta EE Concurrency – avoids spawning unmanaged threads inside an EJB. */
     @Resource
@@ -158,7 +161,7 @@ public class CamundaClientStartup {
                 .build();
 
         client.subscribe("add-note")
-              .handler(new AddNoteHandler(noteService))
+              .handler(addNoteHandler)
               .open();
 
         logger.info("External Task Client started – subscribed to topic 'add-note'");

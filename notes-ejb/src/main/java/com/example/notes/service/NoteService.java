@@ -2,6 +2,7 @@ package com.example.notes.service;
 
 import com.example.notes.entity.Note;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import jakarta.transaction.Transactional;
@@ -14,11 +15,21 @@ public class NoteService {
     @PersistenceContext(unitName = "notesPU")
     private EntityManager em;
 
+    /**
+     * CDI injects a proxy here. The proxy resolves to the actual @RequestScoped
+     * instance at method-call time, so it works from both the servlet request
+     * context (JAX-RS) and the synthetic request context opened by AddNoteHandler
+     * via RequestContextController.
+     */
+    @Inject
+    private CreatorContext creatorContext;
+
     @Transactional
     public Note createNote(String title, String content) {
         Note note = new Note();
         note.setTitle(title);
         note.setContent(content);
+        note.setCreatorName(creatorContext.getCreatorName());
         em.persist(note);
         return note;
     }
