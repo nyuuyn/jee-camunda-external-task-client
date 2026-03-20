@@ -30,4 +30,18 @@ data-source add \
     --max-pool-size=25 \
     --enabled=true
 
+# Bind application-level creator name strings into java:global/ namespace.
+# These are read by NoteResource and AddNoteHandler via @Resource(lookup="java:global/...").
+# Values can be overridden by re-running these commands against a live server.
+/subsystem=naming/binding="java:global\/creator\/restApi":add( \
+    binding-type=simple, \
+    type=java.lang.String, \
+    value="rest api" \
+)
+/subsystem=naming/binding="java:global\/creator\/taskHandler":add( \
+    binding-type=simple, \
+    type=java.lang.String, \
+    value="task handler" \
+)
+
 stop-embedded-server

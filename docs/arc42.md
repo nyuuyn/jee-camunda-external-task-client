@@ -157,7 +157,7 @@ unmanaged threads used by the External Task Client.
 | **Request context on an unmanaged thread** | `AddNoteHandler.execute()` uses `RequestContextController.activate()` / `deactivate()` to open and close a synthetic request context around each task execution, making `@RequestScoped` beans usable on Camunda's worker threads. |
 | **Bootstrapping the External Task Client inside WildFly** | A `@Singleton @Startup` EJB (`CamundaClientStartup`) starts the client using a `ManagedExecutorService` to respect the EJB threading model. |
 | **BPMN process deployment** | The startup EJB deploys the bundled BPMN resource to the Camunda engine via its REST API on every application start (`deploy-changed-only=true` prevents redundant re-deployments). |
-| **Externalised configuration for creator names** | Creator name strings are declared as `<env-entry>` in `web.xml` and injected via `@Resource(name="...")`. This keeps literal values out of source code and allows override at the application-server level without recompilation. |
+| **Externalised configuration for creator names** | Creator name strings are registered as named bindings in WildFly's naming subsystem (`java:global/creator/…`) and injected via `@Resource(lookup="java:global/…")`. Values live in `standalone.xml` and can be changed via WildFly CLI without rebuilding or redeploying the WAR. |
 | **Containerised operation** | Docker Compose with a healthcheck dependency chain: postgres → camunda → wildfly. |
 
 ---
@@ -448,7 +448,7 @@ two injection mechanisms coexist in the same class without conflict:
 private final NoteService noteService;
 
 // EE container — set after construction, not final
-@Resource(name = "creator/taskHandler")
+@Resource(lookup = "java:app/env/creator/taskHandler")
 private String taskHandlerCreatorName;
 ```
 
@@ -523,22 +523,37 @@ Camunda's REST API with `deploy-changed-only=true`. This means:
 
 ### 8.8 EE Environment Entry Injection (`@Resource`)
 
-Jakarta EE `<env-entry>` elements defined in `web.xml` expose named string constants in the
-`java:comp/env/` JNDI namespace. Any CDI-managed bean that is part of the WAR deployment
-(including beans in `WEB-INF/lib` JARs) can read these constants via `@Resource(name="…")`.
+The creator name strings are configured as **named bindings** in WildFly's naming subsystem,
+making them server-level constants that are independent of any WAR deployment.
 
-**Why use env-entries instead of hard-coded strings?**
+**Configuration (docker/configure-wildfly.cli):**
 
-The creator names (`"rest api"`, `"task handler"`) are operational configuration, not business
-logic. Externalising them into `web.xml` means they can be overridden at the application-server
-level (via WildFly CLI or `standalone.xml`) without recompiling the application.
+```
+/subsystem=naming/binding="java:global/creator/restApi":add(
+    binding-type=simple, type=java.lang.String, value="rest api"
+)
+/subsystem=naming/binding="java:global/creator/taskHandler":add(
+    binding-type=simple, type=java.lang.String, value="task handler"
+)
+```
+
+This writes entries into `standalone.xml` under the naming subsystem. They are visible to
+all deployed applications in the server and can be changed via WildFly CLI at any time
+without redeploying the WAR.
+
+**Why use server-level bindings instead of hard-coded strings or `web.xml` env-entries?**
+
+The creator names are operational configuration, not business logic. Server-level bindings
+keep them out of the WAR entirely; an operator can change the values by running a single CLI
+command against the running server. `web.xml` env-entries would also externalise the values,
+but they require a WAR redeployment to change and are scoped to the deployment, not the server.
 
 **Where it is used:**
 
-| Class | JNDI name | Value |
+| Class | `lookup` value | Configured value |
 |---|---|---|
-| `NoteResource` | `java:comp/env/creator/restApi` | `"rest api"` |
-| `AddNoteHandler` | `java:comp/env/creator/taskHandler` | `"task handler"` |
+| `NoteResource` | `java:global/creator/restApi` | `"rest api"` |
+| `AddNoteHandler` | `java:global/creator/taskHandler` | `"task handler"` |
 
 **Injection mechanics:**
 
@@ -555,16 +570,16 @@ public AddNoteHandler(NoteService noteService,
                       CreatorContext creatorContext,
                       RequestContextController rcc) { … }
 
-@Resource(name = "creator/taskHandler")   // EE — runs post-construction
-private String taskHandlerCreatorName;    // cannot be final
+@Resource(lookup = "java:global/creator/taskHandler")   // EE — runs post-construction
+private String taskHandlerCreatorName;                  // cannot be final
 ```
 
-**Namespace sharing across JARs:**
+**`name` vs `lookup` in `@Resource`:**
 
-The Camunda client module (`notes-camunda-client.jar`) lives in `WEB-INF/lib` of the WAR.
-All CDI beans in `WEB-INF/lib` JARs share the **WAR's** `java:comp/env` namespace, so
-env-entries declared in `web.xml` are accessible from `AddNoteHandler` even though it is
-packaged in a separate JAR module.
+- `@Resource(name = "creator/taskHandler")` — relative shorthand; always resolved under
+  `java:comp/env/` (only works for `<env-entry>` declarations in `web.xml`).
+- `@Resource(lookup = "java:global/creator/taskHandler")` — absolute JNDI path; used for
+  server-level bindings that exist outside any deployment descriptor.
 
 ---
 
@@ -680,30 +695,31 @@ to Camunda's REST API at startup.
 - `CamundaClientStartup` must wait for the Camunda engine to be ready before deploying, which
   is handled by a polling loop.
 
-### ADR-006: Creator Names Read via `@Resource` / `<env-entry>`, Not Hard-Coded
+### ADR-006: Creator Names as WildFly Naming Bindings (`java:global/`), Not Hard-Coded
 
 **Context:** Two classes need a creator-name string: `NoteResource` (`"rest api"`) and
 `AddNoteHandler` (`"task handler"`). These strings could be hard-coded as constants,
-injected as CDI `@Produces String` with a qualifier, or read from JNDI via `@Resource`.
+declared as `<env-entry>` in `web.xml`, or configured as server-level JNDI bindings.
 
-**Decision:** Declare the strings as `<env-entry>` elements in `web.xml` and inject them
-with `@Resource(name="…")`.
+**Decision:** Register the strings as named bindings in WildFly's naming subsystem under
+`java:global/creator/…` (via `docker/configure-wildfly.cli`) and inject them with
+`@Resource(lookup="java:global/…")`.
 
 **Rationale:**
 
 | Option | Verdict |
 |---|---|
 | Hard-coded constants | Simple, but the value cannot be changed without recompiling. |
-| CDI `@Produces @Qualifier String` | Works, but requires a qualifier annotation per value and hides the fact that these are operational strings, not domain objects. |
-| `<env-entry>` + `@Resource` | Values live in the deployment descriptor; they can be overridden by the application server without touching Java sources. The EE standard approach for externalising string constants. |
+| CDI `@Produces @Qualifier String` | Works, but requires a qualifier annotation per value and blurs the distinction between domain beans and configuration strings. |
+| `<env-entry>` in `web.xml` | Externalises the value from source code, but it is still part of the WAR — changing it requires redeploying the application. |
+| WildFly naming binding (`java:global/`) | Value lives in `standalone.xml`; an operator can change it with a single CLI command against the running server, with no WAR rebuild or redeployment. |
 
 **Consequences:**
-- `@Resource` fields cannot be `final`, slightly weakening the immutability of the
-  affected beans. This is acceptable because these values are effectively constants set
-  once at deployment time.
-- All CDI beans in `WEB-INF/lib` JARs share the WAR's `java:comp/env` namespace, so
-  `AddNoteHandler` in `notes-camunda-client.jar` can read entries declared in `notes-war`'s
-  `web.xml` without any additional configuration.
+- `@Resource` fields cannot be `final`, slightly weakening immutability. This is acceptable
+  because these values are effectively constants set once at server startup.
+- The binding must be present in WildFly before the WAR deploys, or deployment fails with
+  a missing-dependency error. The CLI script in `configure-wildfly.cli` ensures this at
+  image-build time.
 
 ---
 
@@ -824,6 +840,6 @@ and expose it via WildFly's management API or a dedicated health endpoint.
 | **RESTEasy** | The JAX-RS implementation bundled with WildFly. |
 | **Weld** | The CDI reference implementation, bundled with WildFly. |
 | **WildFly** | Open-source Jakarta EE 10 application server, developed by Red Hat. Used as the runtime for this application. |
-| **`@Resource`** | Jakarta EE annotation that injects a named resource from the JNDI namespace into a bean field. Processed by the EE container post-construction, so the annotated field cannot be `final`. |
-| **`<env-entry>`** | A `web.xml` / `ejb-jar.xml` element that binds a named string (or other primitive type) constant into `java:comp/env/`. The standard mechanism for externalising configuration values that `@Resource` can then inject. |
-| **`java:comp/env`** | The JNDI namespace reserved for component-level environment entries. Within a WAR deployment, all CDI beans (including those in `WEB-INF/lib` JARs) share the WAR's `java:comp/env` namespace. |
+| **`@Resource`** | Jakarta EE annotation that injects a named resource from the JNDI namespace into a bean field. The `name` attribute is resolved relative to `java:comp/env/`; the `lookup` attribute accepts a full absolute JNDI path (e.g. `java:global/…`). Processed by the EE container post-construction, so the annotated field cannot be `final`. |
+| **`java:global/`** | The server-wide JNDI namespace in Jakarta EE. Bindings configured here are visible to all deployed applications and all their modules. WildFly populates this namespace from the `<bindings>` element in the naming subsystem of `standalone.xml`. |
+| **WildFly naming binding** | A `<simple-binding>` entry in WildFly's naming subsystem that maps a JNDI name to a literal value (string, integer, etc.). Configured via the WildFly CLI command `/subsystem=naming/binding=…:add(binding-type=simple, …)` and persisted in `standalone.xml`. |

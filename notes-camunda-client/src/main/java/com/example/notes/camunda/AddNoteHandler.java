@@ -51,15 +51,15 @@ public class AddNoteHandler implements ExternalTaskHandler {
     private final RequestContextController requestContextController;
 
     /**
-     * Injected by the EE container from java:comp/env/creator/taskHandler,
-     * declared as an <env-entry> in web.xml of the enclosing WAR.
+     * Injected by the EE container from java:global/creator/taskHandler,
+     * configured as a naming binding in WildFly's standalone.xml
+     * (see docker/configure-wildfly.cli).
      *
-     * All CDI-managed beans in WEB-INF/lib share the WAR's java:comp/env
-     * namespace, so this @Resource field injection is processed by the EE
-     * container independently of the @Inject constructor below.
-     * The field cannot be final because @Resource is set after construction.
+     * @Resource is processed independently of CDI: the container sets this
+     * field after the bean is constructed. It cannot be final, but it is
+     * effectively constant for the lifetime of the application.
      */
-    @Resource(name = "creator/taskHandler")
+    @Resource(lookup = "java:global/creator/taskHandler")
     private String taskHandlerCreatorName;
 
     @Inject

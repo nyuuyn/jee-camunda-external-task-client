@@ -270,7 +270,7 @@ public class AddNoteHandler implements ExternalTaskHandler {
     private final RequestContextController requestContextController;
 
     // EE container injection — set after construction, cannot be final (see below)
-    @Resource(name = "creator/taskHandler")
+    @Resource(lookup = "java:app/env/creator/taskHandler")
     private String taskHandlerCreatorName;
 
     @Inject  // ← CDI constructor injection
@@ -306,43 +306,48 @@ Constructor injection with `final` fields is cleaner and the intent is clear.
 ### EE Resource Injection with @Resource
 
 Beyond CDI beans, Jakarta EE provides a second injection mechanism — `@Resource` — for
-**environment entries and container-managed resources** such as datasources, JMS destinations,
-and simple configuration values. These are declared in `web.xml` and bound into the
-`java:comp/env/` JNDI namespace of the WAR.
+**container-managed resources** such as datasources, JMS destinations, and named
+configuration values. The creator name strings are configured as **WildFly naming bindings**
+in `standalone.xml` and injected via `@Resource(lookup="java:global/...")`.
 
-#### Declaring values in web.xml
+#### Configuring values in WildFly (docker/configure-wildfly.cli)
 
-```xml
-<env-entry>
-    <env-entry-name>creator/restApi</env-entry-name>
-    <env-entry-type>java.lang.String</env-entry-type>
-    <env-entry-value>rest api</env-entry-value>
-</env-entry>
+The values are registered in WildFly's naming subsystem at image-build time:
 
-<env-entry>
-    <env-entry-name>creator/taskHandler</env-entry-name>
-    <env-entry-type>java.lang.String</env-entry-type>
-    <env-entry-value>task handler</env-entry-value>
-</env-entry>
+```
+/subsystem=naming/binding="java:global/creator/restApi":add(
+    binding-type=simple, type=java.lang.String, value="rest api"
+)
+/subsystem=naming/binding="java:global/creator/taskHandler":add(
+    binding-type=simple, type=java.lang.String, value="task handler"
+)
 ```
 
-The `<env-entry-name>` maps to the JNDI path `java:comp/env/creator/restApi` and
-`java:comp/env/creator/taskHandler` respectively.
+This writes two entries into `standalone.xml` under `<subsystem xmlns="urn:jboss:domain:naming:…">`.
+They are **server-level** constants — visible to all deployed applications and changeable via
+WildFly CLI without redeploying the WAR.
 
 #### Injecting with @Resource
 
-The EE container resolves the entry by name and sets the field **after** the bean is
-constructed. The `name` attribute of `@Resource` is relative to `java:comp/env/`:
+The EE container looks up the absolute JNDI path and sets the field **after** the bean is
+constructed. The `lookup` attribute is used because `java:global/` is an absolute path, not
+relative to `java:comp/env/`:
 
 ```java
 // In NoteResource (JAX-RS resource, WAR CDI bean):
-@Resource(name = "creator/restApi")
+@Resource(lookup = "java:global/creator/restApi")
 private String restApiCreatorName;   // set by EE container, not CDI
 
 // In AddNoteHandler (@Dependent CDI bean, lives in WEB-INF/lib):
-@Resource(name = "creator/taskHandler")
+@Resource(lookup = "java:global/creator/taskHandler")
 private String taskHandlerCreatorName;
 ```
+
+> **`name` vs `lookup` in `@Resource`:**
+> - `name = "creator/restApi"` — relative shorthand, always resolved under `java:comp/env/`
+>   (only works for `<env-entry>` / `<resource-ref>` declarations in `web.xml`)
+> - `lookup = "java:global/creator/restApi"` — absolute JNDI path; used for server-level
+>   bindings that exist outside the deployment descriptor
 
 #### Coexistence of @Resource and @Inject in AddNoteHandler
 
@@ -358,17 +363,18 @@ This means `AddNoteHandler` uses constructor injection for its CDI dependencies
 (`NoteService`, `CreatorContext`, `RequestContextController`) and field injection via
 `@Resource` for the configuration string — each mechanism doing what it is best suited for.
 
-#### Shared java:comp/env namespace
+#### Changing the values without recompiling
 
-All CDI-managed beans within a WAR deployment — including those loaded from JARs in
-`WEB-INF/lib` — share the WAR's `java:comp/env` namespace. This is why `AddNoteHandler`,
-which lives in `notes-camunda-client.jar` inside `WEB-INF/lib`, can inject
-`creator/taskHandler` declared in the WAR's `web.xml` without any additional configuration.
+Because the bindings live in WildFly's `standalone.xml` rather than in application code,
+they can be updated at runtime via the WildFly CLI:
 
-> **Changing the creator names without recompiling:** Because the values live in `web.xml`
-> rather than in source code, they can be overridden at the application-server level via
-> a JNDI binding in `standalone.xml`, a deployment overlay, or an environment-specific
-> `web.xml` — without touching application code.
+```
+/subsystem=naming/binding="java:global\/creator\/restApi":write-attribute(
+    name=value, value="new name"
+)
+```
+
+No WAR rebuild or redeployment is required.
 
 ---
 

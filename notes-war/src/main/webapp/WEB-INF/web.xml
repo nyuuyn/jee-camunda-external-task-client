@@ -6,28 +6,10 @@
          version="6.0">
 
     <!--
-      Environment entries bind named string constants into java:comp/env/.
-      Both values are injected via @Resource(name="...") into NoteResource
-      and AddNoteHandler respectively, so the creator names are configurable
-      at the application-server level without recompiling the application.
-
-      JNDI paths resolved by @Resource(name="<entry-name>"):
-        java:comp/env/creator/restApi     → "rest api"
-        java:comp/env/creator/taskHandler → "task handler"
-
-      All CDI-managed beans within this WAR deployment (including those in
-      WEB-INF/lib JARs) share this java:comp/env namespace.
+      Creator name strings are no longer declared here as <env-entry> elements.
+      They are configured as naming bindings in WildFly's standalone.xml
+      (see docker/configure-wildfly.cli) under java:global/creator/ and
+      injected via @Resource(lookup="java:global/creator/...").
     -->
-    <env-entry>
-        <env-entry-name>creator/restApi</env-entry-name>
-        <env-entry-type>java.lang.String</env-entry-type>
-        <env-entry-value>rest api</env-entry-value>
-    </env-entry>
-
-    <env-entry>
-        <env-entry-name>creator/taskHandler</env-entry-name>
-        <env-entry-type>java.lang.String</env-entry-type>
-        <env-entry-value>task handler</env-entry-value>
-    </env-entry>
 
 </web-app>

@@ -27,14 +27,15 @@ public class NoteResource {
     private CreatorContext creatorContext;
 
     /**
-     * Injected by the EE container from java:comp/env/creator/restApi,
-     * declared as an <env-entry> in web.xml.
+     * Injected by the EE container from java:global/creator/restApi,
+     * configured as a naming binding in WildFly's standalone.xml
+     * (see docker/configure-wildfly.cli).
      *
      * @Resource is processed independently of CDI: the container sets this
      * field after the bean is constructed. It cannot be final, but it is
      * effectively constant for the lifetime of the application.
      */
-    @Resource(name = "creator/restApi")
+    @Resource(lookup = "java:global/creator/restApi")
     private String restApiCreatorName;
 
     @GET
