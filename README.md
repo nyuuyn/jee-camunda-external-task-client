@@ -1,5 +1,7 @@
 # JEE Notes App with Camunda 7 External Task Client
 
+[![CI](https://github.com/nyuuyn/jee-camunda-external-task-client/actions/workflows/ci.yml/badge.svg)](https://github.com/nyuuyn/jee-camunda-external-task-client/actions/workflows/ci.yml)
+
 A Maven multi-module Jakarta EE 10 application running on WildFly 32 that demonstrates how to
 integrate a **Camunda 7 External Task Client** inside a Jakarta EE application server — including
 proper CDI bean injection into external task handlers and how to bridge the gap between
