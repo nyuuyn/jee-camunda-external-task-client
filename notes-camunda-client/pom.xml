@@ -55,5 +55,42 @@
                 </exclusion>
             </exclusions>
         </dependency>
+
+        <!--
+          Test: Camunda process engine + JUnit 5 extension.
+          camunda-bpm-junit5 transitively pulls in camunda-engine.
+          H2 is the in-memory database used by the default engine configuration.
+          slf4j-simple provides the SLF4J binding required by camunda-engine in tests.
+        -->
+        <dependency>
+            <groupId>org.camunda.bpm</groupId>
+            <artifactId>camunda-bpm-junit5</artifactId>
+            <version>${camunda.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- camunda-bpm-junit5 declares camunda-engine as provided; add it explicitly -->
+        <dependency>
+            <groupId>org.camunda.bpm</groupId>
+            <artifactId>camunda-engine</artifactId>
+            <version>${camunda.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <version>2.2.224</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.12</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>
