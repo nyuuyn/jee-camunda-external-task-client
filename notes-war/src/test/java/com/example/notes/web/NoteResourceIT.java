@@ -63,7 +63,9 @@ class NoteResourceIT {
     void createNote_withBlankTitle_returns400() {
         given()
             .contentType(ContentType.JSON)
-            .body("""{"title": "", "content": "no title"}""")
+            .body("""
+                    {"title": "", "content": "no title"}
+                    """)
         .when()
             .post("/notes")
         .then()
@@ -74,7 +76,9 @@ class NoteResourceIT {
     void createNote_withMissingTitle_returns400() {
         given()
             .contentType(ContentType.JSON)
-            .body("""{"content": "no title field"}""")
+            .body("""
+                    {"content": "no title field"}
+                    """)
         .when()
             .post("/notes")
         .then()
@@ -88,7 +92,9 @@ class NoteResourceIT {
         // Create a note first, then fetch it by the returned id
         int id = given()
             .contentType(ContentType.JSON)
-            .body("""{"title": "Fetch Me", "content": ""}""")
+            .body("""
+                    {"title": "Fetch Me", "content": ""}
+                    """)
         .when()
             .post("/notes")
         .then()
@@ -121,7 +127,9 @@ class NoteResourceIT {
     void deleteNote_returns204_andNoteIsGone() {
         int id = given()
             .contentType(ContentType.JSON)
-            .body("""{"title": "Delete Me", "content": ""}""")
+            .body("""
+                    {"title": "Delete Me", "content": ""}
+                    """)
         .when()
             .post("/notes")
         .then()
@@ -157,7 +165,9 @@ class NoteResourceIT {
     void updateNote_returns200_withUpdatedFields() {
         int id = given()
             .contentType(ContentType.JSON)
-            .body("""{"title": "Original", "content": "original content"}""")
+            .body("""
+                    {"title": "Original", "content": "original content"}
+                    """)
         .when()
             .post("/notes")
         .then()
@@ -166,7 +176,9 @@ class NoteResourceIT {
 
         given()
             .contentType(ContentType.JSON)
-            .body("""{"title": "Updated", "content": "updated content"}""")
+            .body("""
+                    {"title": "Updated", "content": "updated content"}
+                    """)
         .when()
             .put("/notes/" + id)
         .then()
