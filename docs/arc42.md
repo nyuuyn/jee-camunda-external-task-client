@@ -4,8 +4,8 @@
 
 | Attribute | Value |
 |---|---|
-| Version | 1.0 |
-| Date | 2026-03-20 |
+| Version | 1.1 |
+| Date | 2026-03-23 |
 | Status | Living Document |
 
 ---
@@ -154,7 +154,7 @@ unmanaged threads used by the External Task Client.
 | **Single domain service** for both entry points | `NoteService` is `@ApplicationScoped`. Both `NoteResource` and `AddNoteHandler` inject it. The service is unaware of which caller it serves. |
 | **Context propagation** without coupling the service to the caller | A `@RequestScoped` CDI bean (`CreatorContext`) carries the caller identity. The service reads it via a proxy at call time. Each entry point sets the value before invoking the service. |
 | **CDI injection in the External Task handler** | `AddNoteHandler` is declared `@Dependent`, making it a full CDI bean that receives its dependencies via constructor injection with `@Inject`. |
-| **Request context on an unmanaged thread** | `AddNoteHandler.execute()` uses `RequestContextController.activate()` / `deactivate()` to open and close a synthetic request context around each task execution, making `@RequestScoped` beans usable on Camunda's worker threads. |
+| **Request context on an unmanaged thread** | Two layers: `CamundaClientStartup` wraps `AddNoteHandler` with `ContextService.createContextualProxy()` to propagate EE container context (classloader, JNDI, security) to Camunda threads. Inside `execute()`, `RequestContextController.activate()` / `deactivate()` opens a fresh CDI `@RequestScoped` context for each task execution, making `@RequestScoped` beans such as `CreatorContext` usable on those threads. |
 | **Bootstrapping the External Task Client inside WildFly** | A `@Singleton @Startup` EJB (`CamundaClientStartup`) starts the client using a `ManagedExecutorService` to respect the EJB threading model. |
 | **BPMN process deployment** | The startup EJB deploys the bundled BPMN resource to the Camunda engine via its REST API on every application start (`deploy-changed-only=true` prevents redundant re-deployments). |
 | **Externalised configuration for creator names** | Values are WildFly naming bindings (`java:global/creator/…` in `standalone.xml`). The EAR's `application.xml` declares `<resource-ref>` elements under `java:app/creator/…` that alias those bindings. Code injects via `@Resource(lookup="java:app/creator/…")`. Changing a value requires only a WildFly CLI command — no rebuild or redeployment. |
@@ -194,6 +194,9 @@ notes-ejb
 └── service/
     ├── NoteService            @ApplicationScoped — CRUD operations via EntityManager
     │                         Reads CreatorContext to stamp the creator on persist.
+    │                         Injects restApiCreatorName and taskHandlerCreatorName via
+    │                         @Resource(lookup="java:app/creator/…") and validates that
+    │                         the CreatorContext value is one of these before persisting.
     └── CreatorContext         @RequestScoped — mutable holder for the creator name.
                               Injected as a proxy everywhere; resolved at call time.
 ```
@@ -207,6 +210,10 @@ notes-camunda-client
 │                             2. Deploys add-note-process.bpmn via REST
 │                             3. Builds ExternalTaskClient and subscribes AddNoteHandler
 │                             Uses ManagedExecutorService for background work.
+│                             @Resource fields: ManagedExecutorService (default),
+│                             ContextService (java:comp/DefaultContextService).
+│                             Wraps AddNoteHandler with contextService.createContextualProxy()
+│                             so WildFly container contexts are available on Camunda threads.
 │
 ├── AddNoteHandler             @Dependent ExternalTaskHandler
 │                             @Inject constructor: NoteService, CreatorContext,
@@ -242,8 +249,12 @@ notes-war
 ```
   application.xml resource-refs (java:app/)
   ├─ java:app/creator/restApi ──────@Resource(lookup)──► NoteResource.restApiCreatorName
+  │                                 @Resource(lookup)──► NoteService.restApiCreatorName
   └─ java:app/creator/taskHandler ──@Resource(lookup)──► AddNoteHandler.taskHandlerCreatorName
-       └─► java:global/creator/… (WildFly standalone.xml)
+  │                                 @Resource(lookup)──► NoteService.taskHandlerCreatorName
+  └─► java:global/creator/… (WildFly standalone.xml)
+
+  java:comp/DefaultContextService ──@Resource(lookup)──► CamundaClientStartup.contextService
 
 NoteResource                    AddNoteHandler
     │  @Inject                      │  @Inject (constructor)
@@ -258,11 +269,14 @@ NoteResource                    AddNoteHandler
               │                                │
               ▼                                ▼
          NoteService  ──@Inject──►  CreatorContext (proxy)
-              │                         │ resolves at call time to the
-              │                         │ active @RequestScoped instance
-              ▼                         ▼
-         EntityManager           creatorName: "rest api"
-              │                    or "task handler"
+              │  @Resource           │ resolves at call time to the
+              ├─► restApiCreatorName │ active @RequestScoped instance
+              ├─► taskHandlerCreatorName▼
+              │  validates           creatorName: "rest api"
+              │  creatorContext        or "task handler"
+              ▼
+         EntityManager
+              │
               ▼
          PostgreSQL
 ```
@@ -488,13 +502,42 @@ thrown at the moment of the first method call — not at injection time.
 Camunda's External Task Client maintains its own internal thread pool. These threads are not
 managed by the Jakarta EE container and have no request context associated with them.
 
-The solution is `jakarta.enterprise.context.control.RequestContextController`, a portable CDI
-2.0 built-in bean that allows application code to manually manage the request context lifecycle:
+Two complementary mechanisms are used together:
+
+**1. `ContextService.createContextualProxy()` (Jakarta EE Concurrency)**
+
+`CamundaClientStartup` wraps `AddNoteHandler` with a contextual proxy before handing it to
+the External Task Client:
+
+```java
+@Resource(lookup = "java:comp/DefaultContextService")
+private ContextService contextService;
+
+// in startExternalTaskClient():
+client.subscribe("add-note")
+      .handler(contextService.createContextualProxy(addNoteHandler, ExternalTaskHandler.class))
+      .open();
+```
+
+The proxy captures the WildFly container context at subscription time (classloader, security
+context, naming context) and restores it on each Camunda worker thread before `execute()` is
+called. This ensures that JNDI lookups, security propagation, and class-loading work correctly
+on the unmanaged thread. `ContextService` is obtained via `@Resource` rather than `@Inject`
+because it is a Jakarta EE Concurrency-managed resource bound at `java:comp/DefaultContextService`.
+
+**2. `RequestContextController` (CDI 2.0)**
+
+`ContextService` propagates contexts that were *already active* when the proxy was created.
+It cannot create a new CDI `@RequestScoped` context from scratch, because no such context
+exists on the `@Singleton` EJB thread where `createContextualProxy` is called.
+
+`jakarta.enterprise.context.control.RequestContextController` fills this gap — it opens a
+fresh synthetic request context directly on the Camunda worker thread:
 
 ```java
 requestContextController.activate();   // creates a new @RequestScoped context on this thread
 try {
-    // @RequestScoped proxies resolve correctly here
+    // @RequestScoped proxies (e.g. CreatorContext) resolve correctly here
 } finally {
     requestContextController.deactivate(); // destroys all @RequestScoped instances
 }
@@ -594,6 +637,44 @@ public AddNoteHandler(NoteService noteService,
 private String taskHandlerCreatorName;               // cannot be final
 ```
 
+**`NoteService` also injects the creator names for validation:**
+
+`NoteService` independently injects both creator name resources and validates the
+`CreatorContext` value before persisting:
+
+```java
+@Resource(lookup = "java:app/creator/restApi")
+private String restApiCreatorName;
+
+@Resource(lookup = "java:app/creator/taskHandler")
+private String taskHandlerCreatorName;
+
+public Note createNote(String title, String content) {
+    String creatorName = creatorContext.getCreatorName();
+    if (!Set.of(restApiCreatorName, taskHandlerCreatorName).contains(creatorName)) {
+        throw new IllegalArgumentException("Invalid creator name: '" + creatorName + "'");
+    }
+    // … persist
+}
+```
+
+This keeps the service layer as the authoritative guard: any new caller that sets an
+unrecognised creator name is rejected before a database write occurs.
+
+**`ContextService` via `java:comp/`:**
+
+Not all `@Resource` injections go through the custom `java:app/` chain. Standard Jakarta EE
+Concurrency resources use the `java:comp/` namespace:
+
+```java
+// In CamundaClientStartup:
+@Resource(lookup = "java:comp/DefaultContextService")
+private ContextService contextService;
+```
+
+WildFly binds the default `ContextService` at `java:comp/DefaultContextService` automatically,
+so no entry in `application.xml` or `configure-wildfly.cli` is needed.
+
 ---
 
 ## 9. Architecture Decisions
@@ -643,17 +724,41 @@ into `CamundaClientStartup` and have its own dependencies injected.
 
 ---
 
-### ADR-003: `RequestContextController` for `@RequestScoped` Beans in the Handler
+### ADR-003: `ContextService` + `RequestContextController` for Unmanaged Threads
 
-**Context:** `CreatorContext` is `@RequestScoped`. Camunda's worker threads have no active
-request context. Accessing a `@RequestScoped` proxy on such a thread throws
-`ContextNotActiveException`.
+**Context:** `AddNoteHandler.execute()` is called on Camunda's internal worker threads.
+These threads are not managed by the Jakarta EE container: they have no EE container context
+(classloader, JNDI, security) and no CDI request context. Two distinct problems must be solved:
 
-**Decision:** Use `jakarta.enterprise.context.control.RequestContextController` to open a
-synthetic request context at the start of each `execute()` invocation and close it in a
-`finally` block.
+1. **EE container context** — JNDI lookups, classloader delegation, and security propagation
+   must work on the worker thread.
+2. **CDI `@RequestScoped` context** — `CreatorContext` is `@RequestScoped`; accessing its
+   proxy without an active request context throws `ContextNotActiveException`.
 
-**Alternatives considered:**
+**Decision:**
+
+Use two complementary mechanisms:
+
+1. Wrap `AddNoteHandler` with `ContextService.createContextualProxy()` in
+   `CamundaClientStartup`. The proxy is created on the EJB thread (which has full EE context)
+   and restores that captured EE context on each Camunda worker invocation.
+
+   `ContextService` is obtained via `@Resource(lookup = "java:comp/DefaultContextService")`
+   rather than `@Inject`, because it is a Jakarta EE Concurrency-managed resource, not a CDI
+   bean.
+
+2. Inside `AddNoteHandler.execute()`, use `RequestContextController.activate()` /
+   `deactivate()` to open and close a fresh synthetic CDI request context for each task
+   execution.
+
+**Why both are needed:**
+
+`ContextService` propagates contexts that are *already active* at proxy-creation time. The EJB
+`@Singleton` thread has no CDI request context, so `createContextualProxy()` cannot capture one.
+`RequestContextController` fills this gap by *creating* a brand-new request context on the
+worker thread.
+
+**Alternatives considered for the CDI request context:**
 
 | Alternative | Why rejected |
 |---|---|
@@ -666,6 +771,8 @@ synthetic request context at the start of each `execute()` invocation and close 
   independent of all other concurrent task executions.
 - `deactivate()` in `finally` guarantees the synthetic context is always closed, preventing
   memory leaks even when the handler throws.
+- `ContextService` must be injected via `@Resource`, not `@Inject` — CDI does not manage
+  Jakarta EE Concurrency objects.
 
 ---
 
@@ -752,6 +859,7 @@ Quality
 ├── Correctness
 │   ├── Notes created via REST always have creatorName = "rest api"
 │   ├── Notes created via BPMN always have creatorName = "task handler"
+│   ├── NoteService rejects any unrecognised creator name before a DB write (IllegalArgumentException)
 │   └── All DB writes are within a JTA transaction (rolled back on failure)
 │
 ├── Maintainability
@@ -855,6 +963,7 @@ and expose it via WildFly's management API or a dedicated health endpoint.
 | **JPA** | Jakarta Persistence API — the standard ORM API used to map `Note` to a database table. |
 | **JTA** | Jakarta Transaction API — the standard for distributed transactions in Jakarta EE. `@Transactional` in `NoteService` uses JTA managed by WildFly's Narayana transaction manager. |
 | **Long-polling** | The technique used by the External Task Client: it sends a request to Camunda and the engine holds the connection open until a task becomes available (up to `asyncResponseTimeout` ms). |
+| **`ContextService`** | Jakarta EE Concurrency API (`jakarta.enterprise.concurrent.ContextService`). Captures the current container context (classloader, security, JNDI naming, etc.) and restores it on other threads via contextual proxies. Obtained via `@Resource(lookup="java:comp/DefaultContextService")`. Does not create new CDI scopes — use `RequestContextController` for that. |
 | **`ManagedExecutorService`** | Jakarta EE Concurrency API. A thread pool managed by the application server, suitable for use inside EJBs where spawning unmanaged threads is forbidden. |
 | **`RequestContextController`** | A portable CDI 2.0 built-in bean (`jakarta.enterprise.context.control`) that allows application code to manually activate and deactivate a request context on any thread. |
 | **RESTEasy** | The JAX-RS implementation bundled with WildFly. |

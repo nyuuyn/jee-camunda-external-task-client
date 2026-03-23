@@ -213,6 +213,10 @@ public class CamundaClientStartup {
     @Resource
     private ManagedExecutorService executor; // Jakarta EE Concurrency
 
+    /** Obtained via the standard java:comp/ binding — not CDI-injected. */
+    @Resource(lookup = "java:comp/DefaultContextService")
+    private ContextService contextService;   // Jakarta EE Concurrency
+
     private ExternalTaskClient client;
 
     @PostConstruct
@@ -232,8 +236,10 @@ public class CamundaClientStartup {
                 .lockDuration(10_000)
                 .build();
 
+        // Wrap the handler with a contextual proxy so the EE container context
+        // (classloader, security, naming) is available on Camunda's worker thread.
         client.subscribe("add-note")
-              .handler(addNoteHandler)  // the CDI-managed @Dependent bean
+              .handler(contextService.createContextualProxy(addNoteHandler, ExternalTaskHandler.class))
               .open();
     }
 }
@@ -370,6 +376,22 @@ private String restApiCreatorName;   // set by EE container, not CDI
 // In AddNoteHandler (@Dependent CDI bean, lives in WEB-INF/lib of the WAR):
 @Resource(lookup = "java:app/creator/taskHandler")
 private String taskHandlerCreatorName;
+
+// In NoteService (@ApplicationScoped, EJB JAR) — both values injected for validation:
+@Resource(lookup = "java:app/creator/restApi")
+private String restApiCreatorName;
+
+@Resource(lookup = "java:app/creator/taskHandler")
+private String taskHandlerCreatorName;
+```
+
+`ContextService` is a standard Jakarta EE Concurrency resource and does not go through
+the custom `java:app/` chain. It is obtained directly from WildFly's `java:comp/` namespace:
+
+```java
+// In CamundaClientStartup:
+@Resource(lookup = "java:comp/DefaultContextService")
+private ContextService contextService;
 ```
 
 #### Coexistence of @Resource and @Inject in AddNoteHandler
@@ -381,6 +403,36 @@ combined in the same class without conflict:
 |---|---|---|---|
 | `@Inject` (constructor) | CDI (Weld) | At bean instantiation | `final` — immutable |
 | `@Resource` (field) | EE container | After construction | Non-`final` — set once, never changed |
+
+#### Creator name validation in NoteService
+
+`NoteService` itself also injects both creator name resources and uses them to validate the
+value in `CreatorContext` before persisting a note:
+
+```java
+@ApplicationScoped
+public class NoteService {
+
+    @Resource(lookup = "java:app/creator/restApi")
+    private String restApiCreatorName;
+
+    @Resource(lookup = "java:app/creator/taskHandler")
+    private String taskHandlerCreatorName;
+
+    @Transactional
+    public Note createNote(String title, String content) {
+        String creatorName = creatorContext.getCreatorName();
+        if (!Set.of(restApiCreatorName, taskHandlerCreatorName).contains(creatorName)) {
+            throw new IllegalArgumentException("Invalid creator name: '" + creatorName + "'");
+        }
+        // … persist note
+    }
+}
+```
+
+Because the valid values are read from the same JNDI chain as the callers set them, the
+service layer is the authoritative guard: any caller path that sets an unrecognised creator
+name is rejected before a database write occurs.
 
 #### Changing the values without recompiling
 

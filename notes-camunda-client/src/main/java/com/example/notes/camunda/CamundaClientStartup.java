@@ -5,9 +5,11 @@ import jakarta.annotation.PreDestroy;
 import jakarta.annotation.Resource;
 import jakarta.ejb.Singleton;
 import jakarta.ejb.Startup;
+import jakarta.enterprise.concurrent.ContextService;
 import jakarta.enterprise.concurrent.ManagedExecutorService;
 import jakarta.inject.Inject;
 import org.camunda.bpm.client.ExternalTaskClient;
+import org.camunda.bpm.client.task.ExternalTaskHandler;
 
 import java.io.InputStream;
 import java.net.URI;
@@ -40,6 +42,9 @@ public class CamundaClientStartup {
      */
     @Inject
     private AddNoteHandler addNoteHandler;
+
+    @Resource(lookup = "java:comp/DefaultContextService")
+    private ContextService contextService;
 
     /** Jakarta EE Concurrency – avoids spawning unmanaged threads inside an EJB. */
     @Resource
@@ -161,7 +166,7 @@ public class CamundaClientStartup {
                 .build();
 
         client.subscribe("add-note")
-              .handler(addNoteHandler)
+              .handler(contextService.createContextualProxy(addNoteHandler, ExternalTaskHandler.class))
               .open();
 
         logger.info("External Task Client started – subscribed to topic 'add-note'");
