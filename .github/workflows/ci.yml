@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: maven
+
+      # Compiles all modules, runs unit tests (NoteServiceTest, AddNoteProcessTest),
+      # packages the EAR, and installs all artifacts to the local Maven repo.
+      # -DskipITs skips Failsafe integration tests; they run after Docker is up.
+      - name: Build and run unit tests
+        run: mvn install -DskipITs
+
+      # The Dockerfile copies notes-ear/target/notes.ear, which was created above.
+      - name: Build WildFly Docker image
+        run: docker compose build wildfly
+
+      - name: Start Docker stack
+        run: docker compose up -d
+
+      # Wait for postgres + camunda healthchecks first, then poll WildFly.
+      # WildFly has no healthcheck in docker-compose.yml so we poll manually.
+      - name: Wait for WildFly to be ready
+        run: |
+          echo "Waiting for WildFly to accept requests..."
+          for i in $(seq 1 36); do
+            if curl -sf http://localhost:8080/notes/api/notes > /dev/null 2>&1; then
+              echo "WildFly ready after ~$((i * 10))s"
+              exit 0
+            fi
+            if [ "$i" -eq 36 ]; then
+              echo "WildFly did not become ready within 360s"
+              docker compose logs wildfly
+              exit 1
+            fi
+            echo "[$i/36] not ready yet, retrying in 10s..."
+            sleep 10
+          done
+
+      # notes-ejb and notes-camunda-client are already in ~/.m2 from the install step.
+      # -DskipTests skips Surefire (no unit tests in notes-war anyway);
+      # Failsafe picks up NoteResourceIT because it ends in IT.
+      - name: Run integration tests
+        run: mvn verify -pl notes-war -DskipTests
+
+      - name: Collect Docker logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop Docker stack
+        if: always()
+        run: docker compose down -v
