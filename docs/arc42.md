@@ -93,17 +93,12 @@ unmanaged threads used by the External Task Client.
 
 ### 3.1 Business Context
 
-```
-                          ┌──────────────────────────────────┐
-                          │        Notes Application         │
-                          │                                  │
-  REST Client ───HTTP────►│  /api/notes  (JAX-RS)            │
-                          │                                  │
-  Camunda Engine ─tasks──►│  add-note    (External Task)     │──── PostgreSQL
-                          │                                  │
-  Camunda Modeler ─BPMN──►│  /deployment/create  (at boot)   │
-                          │                                  │
-                          └──────────────────────────────────┘
+```mermaid
+graph LR
+    RC["REST Client"] -- "HTTP/JSON" --> APP
+    CE["Camunda Engine"] -- "external tasks\nlong-poll" --> APP
+    CM["Camunda Modeler"] -- "BPMN deployment\nat boot" --> APP
+    APP["Notes Application\n/api/notes JAX-RS\nadd-note External Task\n/deployment/create"] -- "JDBC/TCP" --> PG[("PostgreSQL")]
 ```
 
 | Neighbour | Communication | Direction | Protocol |
@@ -115,27 +110,15 @@ unmanaged threads used by the External Task Client.
 
 ### 3.2 Technical Context
 
-```
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  Docker network                                                 │
-  │                                                                 │
-  │  ┌───────────────────┐   JDBC    ┌──────────────────────────┐  │
-  │  │   WildFly 32      │──────────►│  PostgreSQL 16           │  │
-  │  │   (notes WAR)     │           │  notesdb  │  camundadb   │  │
-  │  └────────┬──────────┘           └──────────────────────────┘  │
-  │           │  HTTP long-poll                  ▲                  │
-  │           │  (engine-rest)                   │ JDBC             │
-  │           ▼                                  │                  │
-  │  ┌───────────────────┐                       │                  │
-  │  │  Camunda 7.21     │───────────────────────┘                  │
-  │  │  (Tomcat)         │                                          │
-  │  └───────────────────┘                                          │
-  │                                                                 │
-  └─────────────────────────────────────────────────────────────────┘
-
-  External:
-  REST Client ──HTTP:8080──► WildFly
-  Browser     ──HTTP:8090──► Camunda web app
+```mermaid
+graph TB
+    subgraph DockerNet["Docker network"]
+        WF["WildFly 32\nnotes.war"] -- "JDBC notesdb" --> PG[("PostgreSQL 16\nnotesdb + camundadb\n:5432 host")]
+        WF -- "HTTP long-poll\nengine-rest" --> CAM["Camunda 7.21\nTomcat\n:8090 host"]
+        CAM -- "JDBC camundadb" --> PG
+    end
+    RC["REST Client"] -- "HTTP :8080" --> WF
+    BR["Browser"] -- "HTTP :8090" --> CAM
 ```
 
 | Channel | Protocol | Port |
@@ -167,15 +150,13 @@ unmanaged threads used by the External Task Client.
 
 ### 5.1 Level 1 — System Decomposition
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  notes-app (WAR deployment on WildFly)                           │
-│                                                                  │
-│  ┌─────────────┐  ┌──────────────────────┐  ┌────────────────┐  │
-│  │  notes-ejb  │  │ notes-camunda-client  │  │   notes-war    │  │
-│  │  (domain)   │  │ (Camunda integration) │  │  (REST layer)  │  │
-│  └─────────────┘  └──────────────────────┘  └────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph NotesApp["notes-app (EAR on WildFly)"]
+        EJB["notes-ejb\ndomain"]
+        CC["notes-camunda-client\nCamunda integration"]
+        WAR["notes-war\nREST layer"]
+    end
 ```
 
 | Building Block | Responsibility |
@@ -246,39 +227,31 @@ notes-war
 
 ### 5.5 Level 3 — Key Class Interactions
 
-```
-  application.xml resource-refs (java:app/)
-  ├─ java:app/creator/restApi ──────@Resource(lookup)──► NoteResource.restApiCreatorName
-  │                                 @Resource(lookup)──► NoteService.restApiCreatorName
-  └─ java:app/creator/taskHandler ──@Resource(lookup)──► AddNoteHandler.taskHandlerCreatorName
-  │                                 @Resource(lookup)──► NoteService.taskHandlerCreatorName
-  └─► java:global/creator/… (WildFly standalone.xml)
+```mermaid
+graph TD
+    subgraph JNDI["JNDI resource chain"]
+        GL["java:global/creator/…\nstandalone.xml"]
+        AL["java:app/creator/…\napplication.xml resource-refs"]
+        CS["java:comp/DefaultContextService"]
+        GL --> AL
+    end
 
-  java:comp/DefaultContextService ──@Resource(lookup)──► CamundaClientStartup.contextService
+    AL -- "@Resource restApi" --> NR["NoteResource"]
+    AL -- "@Resource restApi\n+ taskHandler" --> NS["NoteService"]
+    AL -- "@Resource taskHandler" --> ANH["AddNoteHandler"]
+    CS -- "@Resource" --> CCS["CamundaClientStartup"]
 
-NoteResource                    AddNoteHandler
-    │  @Inject                      │  @Inject (constructor)
-    ├─► NoteService (proxy)         ├─► NoteService (proxy)
-    ├─► CreatorContext (proxy)      ├─► CreatorContext (proxy)
-    │                               ├─► RequestContextController
-    │  @Resource (field)            │  @Resource (field, post-construction)
-    └─► restApiCreatorName          └─► taskHandlerCreatorName
-              │                                │
-              │         activate()             │
-              │◄──────────────────────────────-┤
-              │                                │
-              ▼                                ▼
-         NoteService  ──@Inject──►  CreatorContext (proxy)
-              │  @Resource           │ resolves at call time to the
-              ├─► restApiCreatorName │ active @RequestScoped instance
-              ├─► taskHandlerCreatorName▼
-              │  validates           creatorName: "rest api"
-              │  creatorContext        or "task handler"
-              ▼
-         EntityManager
-              │
-              ▼
-         PostgreSQL
+    CCS -- "@Inject" --> ANH
+    NR -- "@Inject" --> NS
+    ANH -- "@Inject ctor" --> NS
+    ANH -- "@Inject ctor" --> RCC["RequestContextController"]
+
+    NR -- "@Inject proxy" --> CC["CreatorContext\n@RequestScoped"]
+    ANH -- "@Inject ctor proxy" --> CC
+    NS -- "@Inject proxy\nvalidates creator name" --> CC
+
+    NS --> EM["EntityManager"]
+    EM --> PG[("PostgreSQL")]
 ```
 
 ### 5.6 Level 2 — notes-ear
@@ -305,72 +278,81 @@ notes-ear
 
 ### 6.1 Scenario: Create Note via REST API
 
-```
-REST Client          NoteResource        CreatorContext       NoteService         PostgreSQL
-    │                     │                   │                   │                   │
-    │  POST /api/notes     │                   │                   │                   │
-    │─────────────────────►│                   │                   │                   │
-    │                      │  servlet container activates          │                   │
-    │                      │  @RequestScoped context automatically │                   │
-    │                      │──setCreatorName("rest api")──────────►│ (proxy resolves)  │
-    │                      │                   │ ◄─ real instance  │                   │
-    │                      │──createNote(title, content)──────────►│                   │
-    │                      │                   │                   │──getCreatorName()─►│
-    │                      │                   │◄──"rest api"──────│                   │
-    │                      │                   │                   │──INSERT note──────►│
-    │                      │                   │                   │◄──note (with id)───│
-    │                      │◄────────────────────────────────────── note               │
-    │  201 Created (note)  │                   │                   │                   │
-    │◄─────────────────────│                   │                   │                   │
-    │                      │  container deactivates @RequestScoped context             │
+```mermaid
+sequenceDiagram
+    participant RC as REST Client
+    participant NR as NoteResource
+    participant CC as CreatorContext
+    participant NS as NoteService
+    participant PG as PostgreSQL
+
+    RC->>NR: POST /api/notes
+    Note over NR: servlet container activates @RequestScoped context
+    NR->>CC: setCreatorName("rest api")
+    Note over CC: proxy resolves to real instance
+    NR->>NS: createNote(title, content)
+    NS->>CC: getCreatorName()
+    CC-->>NS: "rest api"
+    NS->>PG: INSERT note
+    PG-->>NS: note (with id)
+    NS-->>NR: note
+    NR-->>RC: 201 Created
+    Note over NR: container deactivates @RequestScoped context
 ```
 
 ### 6.2 Scenario: Create Note via Camunda External Task
 
-```
-Camunda Engine    CamundaClientStartup    AddNoteHandler     CreatorContext    NoteService    PostgreSQL
-      │                   │                    │                  │                │               │
-      │  [task available] │                    │                  │                │               │
-      │◄──long-poll───────│                    │                  │                │               │
-      │──lock & return────►                    │                  │                │               │
-      │                   │──execute(task)─────►                  │                │               │
-      │                   │                    │─activate()──────►│ (open context) │               │
-      │                   │                    │─setCreatorName───►                │               │
-      │                   │                    │  ("task handler")│                │               │
-      │                   │                    │──createNote(title, content)───────►               │
-      │                   │                    │                  │◄─proxy resolves─               │
-      │                   │                    │                  │─getCreatorName()               │
-      │                   │                    │                  │──"task handler"─►              │
-      │                   │                    │                  │                 │─INSERT───────►│
-      │                   │                    │                  │                 │◄─note─────────│
-      │                   │                    │◄─────────────────────────── note  │               │
-      │                   │                    │─deactivate()────►│ (destroy ctx)  │               │
-      │◄──complete(task)──│◄───────────────────│                  │                │               │
+```mermaid
+sequenceDiagram
+    participant CE as Camunda Engine
+    participant CCS as CamundaClientStartup
+    participant ANH as AddNoteHandler
+    participant CC as CreatorContext
+    participant NS as NoteService
+    participant PG as PostgreSQL
+
+    CCS->>CE: long-poll
+    CE-->>CCS: lock & return task
+    CCS->>ANH: execute(task)
+    ANH->>CC: activate() — open request context
+    ANH->>CC: setCreatorName("task handler")
+    ANH->>NS: createNote(title, content)
+    NS->>CC: getCreatorName() via proxy
+    CC-->>NS: "task handler"
+    NS->>PG: INSERT note
+    PG-->>NS: note
+    NS-->>ANH: note
+    ANH->>CC: deactivate() — destroy context
+    ANH-->>CCS: complete(task, noteId)
+    CCS-->>CE: complete(task)
 ```
 
 ### 6.3 Scenario: Application Startup
 
-```
-Docker Compose    PostgreSQL    Camunda Engine    WildFly / CamundaClientStartup
-      │               │               │                       │
-      │─start─────────►               │                       │
-      │               │─initialise DB─►                       │
-      │               │─run init.sh───►                       │
-      │               │  (create camundadb)                   │
-      │               │─healthcheck OK►                       │
-      │─start─────────────────────────►                       │
-      │               │               │─connect to camundadb─►│
-      │               │               │─create schema─────────►│
-      │               │               │─healthcheck OK─────────►│
-      │─start─────────────────────────────────────────────────►│
-      │               │               │                        │─@PostConstruct
-      │               │               │                        │─submit to ManagedExecutor
-      │               │               │◄──GET /engine-rest/engine (poll until 200)
-      │               │               │──200 OK────────────────►│
-      │               │               │◄──POST /deployment/create (BPMN)
-      │               │               │──200 OK────────────────►│
-      │               │               │◄──long-poll (subscribe "add-note")
-      │               │               │  [client running]       │
+```mermaid
+sequenceDiagram
+    participant DC as Docker Compose
+    participant PG as PostgreSQL
+    participant CE as Camunda Engine
+    participant WF as WildFly / CamundaClientStartup
+
+    DC->>PG: start
+    PG->>PG: initialise DB + run init.sh (create camundadb)
+    PG-->>DC: healthcheck OK
+    DC->>CE: start
+    CE->>PG: connect + create schema (camundadb)
+    PG-->>CE: ready
+    CE-->>DC: healthcheck OK
+    DC->>WF: start
+    WF->>WF: @PostConstruct → submit to ManagedExecutor
+    loop poll until 200
+        WF->>CE: GET /engine-rest/engine
+    end
+    CE-->>WF: 200 OK
+    WF->>CE: POST /deployment/create (BPMN)
+    CE-->>WF: 200 OK
+    WF->>CE: long-poll subscribe "add-note"
+    Note over WF,CE: client running
 ```
 
 ---
@@ -379,49 +361,28 @@ Docker Compose    PostgreSQL    Camunda Engine    WildFly / CamundaClientStartup
 
 ### 7.1 Container Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Host machine                                                       │
-│                                                                     │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │  Docker Compose (bridge network)                              │  │
-│  │                                                               │  │
-│  │  ┌────────────────────┐   ┌────────────────────────────────┐  │  │
-│  │  │  notes-postgres    │   │  notes-camunda                 │  │  │
-│  │  │  postgres:16       │   │  camunda/camunda-bpm-          │  │  │
-│  │  │                    │   │  platform:7.21.0               │  │  │
-│  │  │  notesdb           │   │                                │  │  │
-│  │  │  camundadb         │   │  engine-rest  :8080            │  │  │
-│  │  │                    │   │  cockpit      :8080/camunda    │  │  │
-│  │  │  :5432 (host)      │   │                                │  │  │
-│  │  │                    │   │  :8090 (host)                  │  │  │
-│  │  │  volume:           │   └────────────────────────────────┘  │  │
-│  │  │  postgres-data      │                                       │  │
-│  │  └────────────────────┘                                        │  │
-│  │                                                                │  │
-│  │  ┌────────────────────────────────────────────────────────┐    │  │
-│  │  │  notes-wildfly                                         │    │  │
-│  │  │  quay.io/wildfly/wildfly:32.0.0.Final-jdk17 (custom)  │    │  │
-│  │  │                                                        │    │  │
-│  │  │  standalone.xml ── NotesDS datasource (notesdb)        │    │  │
-│  │  │  deployments/notes.war                                 │    │  │
-│  │  │    WEB-INF/lib/notes-ejb-1.0.0-SNAPSHOT.jar           │    │  │
-│  │  │    WEB-INF/lib/notes-camunda-client-1.0.0-SNAPSHOT.jar│    │  │
-│  │  │    WEB-INF/lib/camunda-external-task-client-7.21.0.jar│    │  │
-│  │  │    WEB-INF/lib/httpclient5-5.3.jar                    │    │  │
-│  │  │    ...                                                 │    │  │
-│  │  │                                                        │    │  │
-│  │  │  :8080 (host) — application                           │    │  │
-│  │  │  :9990 (host) — management                            │    │  │
-│  │  └────────────────────────────────────────────────────────┘    │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Host["Host machine"]
+        subgraph DockerNet["Docker Compose bridge network"]
+            PG["notes-postgres\npostgres:16\nnotesdb + camundadb\nvolume: postgres-data\n:5432 host"]
+            CAM["notes-camunda\ncamunda-bpm-platform:7.21.0\nengine-rest + cockpit\n:8090 host"]
+            WF["notes-wildfly\nwildfly:32.0.0.Final-jdk17 custom\nstandalone.xml + notes.ear\n:8080 app / :9990 mgmt"]
+        end
+    end
+
+    WF -- "JDBC notesdb" --> PG
+    WF -- "HTTP long-poll\nengine-rest" --> CAM
+    CAM -- "JDBC camundadb" --> PG
+    RC(["REST Client"]) -- "HTTP :8080" --> WF
+    BR(["Browser"]) -- "HTTP :8090" --> CAM
 ```
 
 ### 7.2 Startup Dependency Order
 
-```
-postgres ──(healthy)──► camunda ──(healthy)──► wildfly
+```mermaid
+graph LR
+    PG["postgres"] -- "healthy" --> CE["camunda"] -- "healthy" --> WF["wildfly"]
 ```
 
 Healthchecks:
@@ -854,25 +815,28 @@ to Camunda's REST API at startup.
 
 ### 10.1 Quality Tree
 
-```
-Quality
-├── Correctness
-│   ├── Notes created via REST always have creatorName = "rest api"
-│   ├── Notes created via BPMN always have creatorName = "task handler"
-│   ├── NoteService rejects any unrecognised creator name before a DB write (IllegalArgumentException)
-│   └── All DB writes are within a JTA transaction (rolled back on failure)
-│
-├── Maintainability
-│   ├── NoteService has no import from notes-war or notes-camunda-client
-│   └── Adding a new BPMN process requires only a new handler + BPMN file
-│
-├── Demonstrability
-│   ├── CDI injection pattern in the handler is explicit and documented
-│   └── RequestContextController usage is self-contained in AddNoteHandler
-│
-└── Operability
-    ├── System starts with docker compose up --build
-    └── Schema is created automatically on first start
+```mermaid
+graph TD
+    Q((Quality))
+
+    Q --> C[Correctness]
+    Q --> M[Maintainability]
+    Q --> D[Demonstrability]
+    Q --> O[Operability]
+
+    C --> C1["Notes via REST → creatorName = 'rest api'"]
+    C --> C2["Notes via BPMN → creatorName = 'task handler'"]
+    C --> C3["NoteService rejects unrecognised creator names"]
+    C --> C4["All DB writes within JTA transaction"]
+
+    M --> M1["NoteService has no import from WAR or Camunda client"]
+    M --> M2["New BPMN process needs only handler + BPMN file"]
+
+    D --> D1["CDI injection pattern is explicit and documented"]
+    D --> D2["RequestContextController is self-contained in AddNoteHandler"]
+
+    O --> O1["Starts with docker compose up --build"]
+    O --> O2["Schema created automatically on first start"]
 ```
 
 ### 10.2 Quality Scenarios

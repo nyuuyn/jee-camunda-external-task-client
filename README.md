@@ -157,44 +157,26 @@ The persisted note will have `creatorName = "rest api"`.
 
 ### Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     WildFly 32                          │
-│                                                         │
-│  ┌─────────────────┐      ┌─────────────────────────┐  │
-│  │  NoteResource   │      │  CamundaClientStartup   │  │
-│  │  (JAX-RS)       │      │  @Singleton @Startup    │  │
-│  └────────┬────────┘      └──────────┬──────────────┘  │
-│           │ @Inject                  │ @Inject          │
-│           ▼                          ▼                  │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │              NoteService                        │   │
-│  │              @ApplicationScoped                 │   │
-│  │  @Inject CreatorContext (proxy)                 │   │
-│  └─────────────────────────────────────────────────┘   │
-│           ▲                          ▲                  │
-│  servlet  │                          │ RequestContext-   │
-│  request  │                          │ Controller        │
-│  context  │                          │ (synthetic)       │
-│  (auto)   │                          │                  │
-│  ┌────────┴────────┐      ┌──────────┴──────────────┐  │
-│  │  CreatorContext │      │  CreatorContext          │  │
-│  │  "rest api"     │      │  "task handler"          │  │
-│  │  @RequestScoped │      │  @RequestScoped          │  │
-│  └─────────────────┘      └─────────────────────────┘  │
-│                                       ▲                 │
-│                            ┌──────────┴──────────────┐  │
-│                            │    AddNoteHandler        │  │
-│                            │    @Dependent            │  │
-│                            └──────────────────────────┘  │
-│                                       ▲                 │
-└───────────────────────────────────────┼─────────────────┘
-                                        │ long-poll
-                              ┌─────────┴──────────┐
-                              │  Camunda Engine     │
-                              │  (separate container│
-                              │  port 8090)         │
-                              └────────────────────-┘
+```mermaid
+graph TD
+    subgraph WildFly32["WildFly 32"]
+        NR["NoteResource\n(JAX-RS)"]
+        CCS["CamundaClientStartup\n@Singleton @Startup"]
+        ANH["AddNoteHandler\n@Dependent"]
+        NS["NoteService\n@ApplicationScoped"]
+        CC1["CreatorContext\n'rest api'\n@RequestScoped"]
+        CC2["CreatorContext\n'task handler'\n@RequestScoped"]
+
+        NR -- "@Inject" --> NS
+        CCS -- "@Inject" --> ANH
+        ANH -- "@Inject" --> NS
+        NR -. "servlet request\ncontext (auto)" .-> CC1
+        ANH -. "RequestContextController\n(synthetic)" .-> CC2
+        NS -. "proxy" .-> CC1
+        NS -. "proxy" .-> CC2
+    end
+
+    CE["Camunda Engine\n(port 8090)"] -- "long-poll" --> CCS
 ```
 
 ---
@@ -552,12 +534,10 @@ external task handler, wrap your handler logic with `RequestContextController.ac
 
 `add-note-process.bpmn` defines a minimal process with a single External Service Task:
 
-```
-┌─────────┐     ┌──────────────────────────────────┐     ┌───────┐
-│  Start  │────►│  Add Note                        │────►│  End  │
-│  Event  │     │  camunda:type="external"          │     │ Event │
-└─────────┘     │  camunda:topic="add-note"         │     └───────┘
-                └──────────────────────────────────-┘
+```mermaid
+graph LR
+    SE([Start Event]) --> AN["Add Note\ncamunda:type=external\ncamunda:topic=add-note"]
+    AN --> EE([End Event])
 ```
 
 - `camunda:type="external"` tells Camunda not to execute this task itself but to expose it
